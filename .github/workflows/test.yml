@@ -35,6 +35,6 @@ jobs:
       - name: script
         run: |
           sudo docker run --rm --name keycloak -d -p 8080:8080 -e KEYCLOAK_ADMIN=admin -e KEYCLOAK_ADMIN_PASSWORD=admin -v $PWD/t/test-realm-keycloak-18.0.2.json:/opt/keycloak/data/import/realm.json quay.io/keycloak/keycloak:18.0.2 start-dev --import-realm
-          sleep 8
+          sleep 30
           export PATH=$OPENRESTY_PREFIX/nginx/sbin:$OPENRESTY_PREFIX/luajit/bin:$PATH
           make test

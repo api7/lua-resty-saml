@@ -22,7 +22,9 @@ docker run --rm --name keycloak -d -p 8080:8080 -e KEYCLOAK_ADMIN=admin -e KEYCL
 
 #### 2.1 Create realm "test"
 
-#### 2.2 Create User "test" with Credential password "test" and disable Temporary
+#### 2.2 Create User "test"
+
+After completion, in the `Credential` tab page, change password to "test" and disable `Temporary`.
 
 #### 2.3 Create client
 
@@ -34,7 +36,7 @@ docker run --rm --name keycloak -d -p 8080:8080 -e KEYCLOAK_ADMIN=admin -e KEYCL
 * Set Root URL "http://127.0.0.1:8088"
 * Valid Redirect URIs: /acs
 * Logout Service Redirect Binding URL: /sls
-* Import Signing Key, just paste your cert file content in PEM format
+* From the keys tab page, import Signing Key, just paste your cert file content in PEM format
 
 ##### sp2
 
@@ -44,13 +46,13 @@ docker run --rm --name keycloak -d -p 8080:8080 -e KEYCLOAK_ADMIN=admin -e KEYCL
 * Set Root URL "http://127.0.0.2:8099"
 * Valid Redirect URIs: /acs
 * Logout Service Redirect Binding URL: /sls
-* Import Signing Key, just paste your cert file content in PEM format
+* From the keys tab page, import Signing Key, just paste your cert file content in PEM format
 
 #### 2.4 Check IdP signing key
 
-http://127.0.0.1:8080/realms/test/protocol/saml/descriptor
+curl -s http://127.0.0.1:8080/realms/test/protocol/saml/descriptor
 
-Copy `<ds:X509Certificate>` block to a file, e.g. `/tmp/idp.cert`, and use `utils/read_cert.py` to convert it into string.
+Copy and paste `<ds:X509Certificate>` block of the output to a file, e.g. `/tmp/idp.cert`, and use `utils/read_cert.py` to convert it into string.
 
 ```
 # for test file

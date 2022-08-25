@@ -7,6 +7,9 @@ with open(sys.argv[1]) as f:
         lines = [s[i:i+64] for i in range(0, len(s), 64)]
         lines.insert(0, "-----BEGIN CERTIFICATE-----")
         lines.append("-----END CERTIFICATE-----")
-        print("\\n".join(lines))
+        if len(sys.argv) >= 3 and sys.argv[2] == "t":
+            print("\\\\n".join(lines))
+        else:
+            print("\\n".join(lines))
     else:
         print("\\n".join(lines))

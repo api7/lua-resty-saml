@@ -1,5 +1,4 @@
 *.o
 *.so
-demo/*
-!demo/logs/.gitkeep
-!demo/nginx.conf
+t/servroot
+deps

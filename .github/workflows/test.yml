@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+
+jobs:
+  build:
+    runs-on: "ubuntu-20.04"
+    env:
+      OPENRESTY_PREFIX: "/usr/local/openresty"
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: get dependencies
+        run: |
+          sudo apt install -y cpanminus build-essential libncurses5-dev libreadline-dev libssl-dev perl lua5.1 liblua5.1-0-dev libxmlsec1-dev
+
+          # openresty
+          wget -O - https://openresty.org/package/pubkey.gpg | sudo apt-key add -
+          echo "deb http://openresty.org/package/ubuntu $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/openresty.list
+          sudo apt-get update
+          sudo apt-get -y install openresty
+
+          # Test::Nginx
+          sudo cpanm --notest Test::Nginx > build.log 2>&1 || (cat build.log && exit 1)
+
+          # docker
+          sudo apt-get remove docker docker-engine docker.io containerd runc
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install docker-ce docker-ce-cli containerd.io docker-compose-plugin
+          sudo docker run hello-world
+
+          # luarocks
+          curl -fsSL https://raw.githubusercontent.com/apache/apisix/master/utils/linux-install-luarocks.sh | sudo sh
+
+      - name: script
+        run: |
+          sudo docker run -d --rm --name keycloak -p 8080:8080 -e KEYCLOAK_USER=admin -e KEYCLOAK_PASSWORD=admin -e KEYCLOAK_IMPORT=/tmp/test-realm.json -v $PWD/t/test-realm-jboss-keycloak-16.1.1.json:/tmp/test-realm.json jboss/keycloak:16.1.1
+          sleep 8
+          export PATH=$OPENRESTY_PREFIX/nginx/sbin:$OPENRESTY_PREFIX/luajit/bin:$PATH
+          make test

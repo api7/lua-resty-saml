@@ -42,7 +42,7 @@ jobs:
 
       - name: script
         run: |
-          sudo docker run -d --rm --name keycloak -p 8080:8080 -e KEYCLOAK_USER=admin -e KEYCLOAK_PASSWORD=admin -e KEYCLOAK_IMPORT=/tmp/test-realm.json -v $PWD/t/test-realm-jboss-keycloak-16.1.1.json:/tmp/test-realm.json jboss/keycloak:16.1.1
+          sudo docker run --rm --name keycloak -d -p 8080:8080 -e KEYCLOAK_ADMIN=admin -e KEYCLOAK_ADMIN_PASSWORD=admin -v $PWD/t/test-realm-keycloak-18.0.2.json:/opt/keycloak/data/import/realm.json quay.io/keycloak/keycloak:18.0.2 start-dev --import-realm
           sleep 8
           export PATH=$OPENRESTY_PREFIX/nginx/sbin:$OPENRESTY_PREFIX/luajit/bin:$PATH
           make test

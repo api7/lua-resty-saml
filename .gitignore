@@ -2,3 +2,4 @@
 *.so
 t/servroot
 deps
+xmlsec1-1.2.28*

@@ -6,13 +6,15 @@ INSTALL ?= install
 LUA_INCDIR=/usr/local/openresty/luajit/include/luajit-2.1/
 LUAJIT_DIR=/usr/local/openresty/luajit
 
+XMLSEC_VER=1.2.28
+
 CC=gcc
 CFLAGS=-g -fPIC -O2
-XMLSEC1_CFLAGS=-D__XMLSEC_FUNCTION__=__func__ -DXMLSEC_NO_SIZE_T -DXMLSEC_NO_GOST=1 -DXMLSEC_NO_GOST2012=1 -DXMLSEC_NO_CRYPTO_DYNAMIC_LOADING=1 -Ixmlsec1-1.2.28/include/ -I/usr/include/libxml2 -DXMLSEC_CRYPTO_OPENSSL=1
+XMLSEC1_CFLAGS=-D__XMLSEC_FUNCTION__=__func__ -DXMLSEC_NO_SIZE_T -DXMLSEC_NO_GOST=1 -DXMLSEC_NO_GOST2012=1 -DXMLSEC_NO_CRYPTO_DYNAMIC_LOADING=1 -Ixmlsec1-$(XMLSEC_VER)/include/ -I/usr/include/libxml2 -DXMLSEC_CRYPTO_OPENSSL=1
 CFLAGS_ALL=$(CFLAGS) -Wall -Werror -std=c99 $(XMLSEC1_CFLAGS)
 LIBFLAG=-shared
 LDFLAGS=-g -O2
-XMLSEC1_STATIC_LIBS=xmlsec1-1.2.28/./src/openssl/.libs/libxmlsec1-openssl.a xmlsec1-1.2.28/./src/.libs/libxmlsec1.a
+XMLSEC1_STATIC_LIBS=xmlsec1-$(XMLSEC_VER)/./src/openssl/.libs/libxmlsec1-openssl.a xmlsec1-$(XMLSEC_VER)/./src/.libs/libxmlsec1.a
 XMLSEC1_LDFLAGS=-lxml2 -lssl -lcrypto -ldl -Wl,--whole-archive $(XMLSEC1_STATIC_LIBS) -Wl,--no-whole-archive -lxslt
 LDFLAGS_ALL=$(LIBFLAG) $(LDFLAGS) $(XMLSEC1_LDFLAGS)
 
@@ -20,9 +22,9 @@ LDFLAGS_ALL=$(LIBFLAG) $(LDFLAGS) $(XMLSEC1_LDFLAGS)
 build: $(XMLSEC1_STATIC_LIBS) saml.so
 
 $(XMLSEC1_STATIC_LIBS):
-	wget --no-check-certificate https://www.aleksey.com/xmlsec/download/older-releases/xmlsec1-1.2.28.tar.gz
-	tar zxf xmlsec1-1.2.28.tar.gz
-	cd xmlsec1-1.2.28; CFLAGS="-std=c99" ./configure --with-openssl --with-pic --disable-crypto-dl --disable-apps-crypto-dl; make
+	wget --no-check-certificate https://www.aleksey.com/xmlsec/download/older-releases/xmlsec1-$(XMLSEC_VER).tar.gz
+	tar zxf xmlsec1-$(XMLSEC_VER).tar.gz
+	cd xmlsec1-$(XMLSEC_VER); CFLAGS="-std=c99" ./configure --with-openssl --with-pic --disable-crypto-dl --disable-apps-crypto-dl; make
 
 .PHONY: test
 test: build deps/
@@ -30,7 +32,7 @@ test: build deps/
 
 .PHONY: clean
 clean:
-	rm -rf *.so *.o xmlsec1-1.2.28*
+	rm -rf *.so *.o xmlsec1-$(XMLSEC_VER)*
 
 saml.o: src/*.c
 	$(CC) -c $(CFLAGS_ALL) -o saml.o src/saml.c

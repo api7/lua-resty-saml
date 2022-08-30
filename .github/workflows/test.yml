@@ -34,7 +34,15 @@ jobs:
 
       - name: script
         run: |
-          sudo docker run --rm --name keycloak -d -p 8080:8080 -e KEYCLOAK_ADMIN=admin -e KEYCLOAK_ADMIN_PASSWORD=admin -v $PWD/t/test-realm-keycloak-18.0.2.json:/opt/keycloak/data/import/realm.json quay.io/keycloak/keycloak:18.0.2 start-dev --import-realm
+          sudo docker run --rm --name keycloak -d -p 8080:8080 -e KEYCLOAK_ADMIN=admin -e KEYCLOAK_ADMIN_PASSWORD=admin quay.io/keycloak/keycloak:18.0.2 start-dev
           sleep 30
+
+          # configure keycloak for test
+          wget https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64 -O jq
+          chmod +x jq
+          docker cp jq keycloak:/usr/bin/
+          docker cp t/kcadm_configure.sh keycloak:/tmp/
+          docker exec keycloak bash /tmp/kcadm_configure.sh
+
           export PATH=$OPENRESTY_PREFIX/nginx/sbin:$OPENRESTY_PREFIX/luajit/bin:$PATH
           make test

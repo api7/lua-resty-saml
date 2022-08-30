@@ -51,8 +51,6 @@ install:
 	$(INSTALL) saml.so $(INST_LIBDIR)/
 	$(INSTALL) -d $(INST_LUADIR)/resty/saml/xsd/
 	$(INSTALL) xsd/* $(INST_LUADIR)/resty/saml/xsd/
-	$(INSTALL) t/lib/*.lua $(INST_LUADIR)/resty/saml/
-	$(INSTALL) t/kcadm_configure.sh $(INST_LUADIR)/resty/saml/
 
 deps/:
 	luarocks install --lua-dir=$(LUAJIT_DIR) rockspec/lua-resty-saml-main-0-0.rockspec --tree=deps --only-deps --local

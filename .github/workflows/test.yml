@@ -37,7 +37,7 @@ jobs:
           sudo docker run --rm --name keycloak -d -p 8080:8080 -e KEYCLOAK_ADMIN=admin -e KEYCLOAK_ADMIN_PASSWORD=admin quay.io/keycloak/keycloak:18.0.2 start-dev
 
           # wait for keycloak ready
-          while true; do curl -s localhost:8080 &>/dev/null; ret=$?; [[ $ret -eq 0 ]] && break; sleep 3; done
+          bash -c 'while true; do curl -s localhost:8080 &>/dev/null; ret=$?; [[ $ret -eq 0 ]] && break; sleep 3; done'
 
           # configure keycloak for test
           wget https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64 -O jq

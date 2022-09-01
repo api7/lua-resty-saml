@@ -330,7 +330,7 @@ local function login_callback(self, opts)
     local state = args.RelayState
     if state ~= data.state then
         ngx.log(ngx.ERR, "state different: args.state=", state, ", state=", data.state)
-        ngx.exit(HTTP_UNAUTHORIZED)
+        ngx.exit(ngx.HTTP_UNAUTHORIZED)
     end
 
     local issuer = saml.doc_issuer(doc)

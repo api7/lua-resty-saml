@@ -9,13 +9,13 @@ LUAJIT_DIR=/usr/local/openresty/luajit
 XMLSEC_VER=1.2.28
 
 CC=gcc
-CFLAGS=-g -fPIC -O2
+CFLAGS=-g -fPIC -O2 -fcommon
 XMLSEC1_CFLAGS=-D__XMLSEC_FUNCTION__=__func__ -DXMLSEC_NO_SIZE_T -DXMLSEC_NO_GOST=1 -DXMLSEC_NO_GOST2012=1 -DXMLSEC_NO_CRYPTO_DYNAMIC_LOADING=1 -Ixmlsec1-$(XMLSEC_VER)/include/ -I/usr/include/libxml2 -DXMLSEC_CRYPTO_OPENSSL=1
 CFLAGS_ALL=$(CFLAGS) -Wall -Werror -std=c99 $(XMLSEC1_CFLAGS)
 LIBFLAG=-shared
 LDFLAGS=-g -O2
 XMLSEC1_STATIC_LIBS=xmlsec1-$(XMLSEC_VER)/./src/openssl/.libs/libxmlsec1-openssl.a xmlsec1-$(XMLSEC_VER)/./src/.libs/libxmlsec1.a
-XMLSEC1_LDFLAGS=-lxml2 -lssl -lcrypto -ldl -Wl,--whole-archive $(XMLSEC1_STATIC_LIBS) -Wl,--no-whole-archive -lxslt
+XMLSEC1_LDFLAGS=-Wl,--whole-archive $(XMLSEC1_STATIC_LIBS) -Wl,--no-whole-archive -lxml2 -lssl -lcrypto -ldl -lxslt
 LDFLAGS_ALL=$(LIBFLAG) $(LDFLAGS) $(XMLSEC1_LDFLAGS)
 
 .PHONY: build

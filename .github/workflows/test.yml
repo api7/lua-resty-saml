@@ -18,13 +18,13 @@ jobs:
 
       - name: get dependencies
         run: |
-          sudo apt install -y cpanminus build-essential libncurses5-dev libreadline-dev libssl-dev libxml2-dev libxslt-dev perl
+          sudo apt install -y cpanminus build-essential libncurses5-dev libreadline-dev perl
 
           # openresty
           wget -O - https://openresty.org/package/pubkey.gpg | sudo apt-key add -
           echo "deb http://openresty.org/package/ubuntu $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/openresty.list
           sudo apt-get update
-          sudo apt-get -y install openresty
+          sudo apt-get -y install openresty openresty-openssl111-dev openresty-zlib-dev
 
           # Test::Nginx
           sudo cpanm --notest Test::Nginx > build.log 2>&1 || (cat build.log && exit 1)

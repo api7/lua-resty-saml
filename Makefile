@@ -3,21 +3,21 @@ INST_LIBDIR ?= $(INST_PREFIX)/lib/lua/5.1
 INST_LUADIR ?= $(INST_PREFIX)/share/lua/5.1
 INSTALL ?= install
 
-LUA_INCDIR=/usr/local/openresty/luajit/include/luajit-2.1/
-LUAJIT_DIR=/usr/local/openresty/luajit
-OPENSSL_DIR=/usr/local/openresty/openssl111
+LUA_INCDIR ?= /usr/local/openresty/luajit/include/luajit-2.1/
+LUAJIT_DIR = /usr/local/openresty/luajit
+OPENSSL_DIR ?= /usr/local/openresty/openssl111
 
-XMLSEC_VER=1.2.28
+XMLSEC_VER = 1.2.28
 
-CC=gcc
-CFLAGS_SAML=-g -fPIC -O2 -fcommon
-XMLSEC1_CFLAGS=-D__XMLSEC_FUNCTION__=__func__ -DXMLSEC_NO_SIZE_T -DXMLSEC_NO_GOST=1 -DXMLSEC_NO_GOST2012=1 -DXMLSEC_NO_CRYPTO_DYNAMIC_LOADING=1 -Ixmlsec1-$(XMLSEC_VER)/include/ -I/usr/include/libxml2 -DXMLSEC_CRYPTO_OPENSSL=1
+CC = gcc
+CFLAGS_SAML = -g -fPIC -O2 -fcommon
+XMLSEC1_CFLAGS = -D__XMLSEC_FUNCTION__=__func__ -DXMLSEC_NO_SIZE_T -DXMLSEC_NO_GOST=1 -DXMLSEC_NO_GOST2012=1 -DXMLSEC_NO_CRYPTO_DYNAMIC_LOADING=1 -Ixmlsec1-$(XMLSEC_VER)/include/ -I/usr/include/libxml2 -DXMLSEC_CRYPTO_OPENSSL=1
 CFLAGS_ALL=$(CFLAGS_SAML) -Wall -Werror -std=c99 $(XMLSEC1_CFLAGS)
-LIBFLAG=-shared
-LDFLAGS=-g -O2
-XMLSEC1_STATIC_LIBS=xmlsec1-$(XMLSEC_VER)/./src/openssl/.libs/libxmlsec1-openssl.a xmlsec1-$(XMLSEC_VER)/./src/.libs/libxmlsec1.a
-XMLSEC1_LDFLAGS=-Wl,--whole-archive $(XMLSEC1_STATIC_LIBS) -Wl,--no-whole-archive -L$(OPENSSL_DIR)/lib/ -lxml2 -lssl -lcrypto -ldl -lxslt -Wl,-rpath $(OPENSSL_DIR)/lib
-LDFLAGS_ALL=$(LIBFLAG) $(LDFLAGS) $(XMLSEC1_LDFLAGS)
+LIBFLAG = -shared
+LDFLAGS = -g -O2
+XMLSEC1_STATIC_LIBS = xmlsec1-$(XMLSEC_VER)/./src/openssl/.libs/libxmlsec1-openssl.a xmlsec1-$(XMLSEC_VER)/./src/.libs/libxmlsec1.a
+XMLSEC1_LDFLAGS = -Wl,--whole-archive $(XMLSEC1_STATIC_LIBS) -Wl,--no-whole-archive -L$(OPENSSL_DIR)/lib/ -lxml2 -lssl -lcrypto -ldl -lxslt -Wl,-rpath $(OPENSSL_DIR)/lib
+LDFLAGS_ALL = $(LIBFLAG) $(LDFLAGS) $(XMLSEC1_LDFLAGS)
 
 ### build:        build from source
 .PHONY: build

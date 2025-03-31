@@ -24,7 +24,7 @@ LDFLAGS_ALL = $(LIBFLAG) $(LDFLAGS) $(XMLSEC1_LDFLAGS)
 build: $(XMLSEC1_STATIC_LIBS) saml.so
 
 $(XMLSEC1_STATIC_LIBS):
-	wget --no-check-certificate https://www.aleksey.com/xmlsec/download/older-releases/xmlsec1-$(XMLSEC_VER).tar.gz
+	wget https://github.com/api7/xmlsec-fork/releases/download/$(XMLSEC_VER)/xmlsec1-$(XMLSEC_VER).tar.gz
 	tar zxf xmlsec1-$(XMLSEC_VER).tar.gz
 	cd xmlsec1-$(XMLSEC_VER); CFLAGS="-std=c99" ./configure --with-openssl=$(OPENSSL_DIR)/ --with-pic --disable-crypto-dl --disable-apps-crypto-dl; make
 

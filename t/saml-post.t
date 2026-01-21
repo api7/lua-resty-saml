@@ -58,8 +58,8 @@ _EOC_
                 if samls[sp_issuer] == nil then
                     local kc = require("lib.keycloak")
                     local opts = setmetatable({sp_issuer = sp_issuer}, {__index = kc.get_default_opts()})
+                    opts.auth_protocol_binding_method = "HTTP-POST"
                     ngx.log(ngx.INFO, "create sp_issuer=", sp_issuer)
-                    opts.auth_protocol_binding_method = "HTTP-Redirect"
                     local saml = require("resty.saml").new(opts)
                     samls[sp_issuer] = saml
                 end
@@ -135,7 +135,7 @@ __DATA__
     }
 --- error_code: 200
 --- error_log
-login callback req with redirect
+login callback req with http post
 
 
 === TEST 2: login sp1 and sp2, then do single logout
@@ -197,4 +197,4 @@ login callback req with redirect
     }
 --- error_code: 200
 --- error_log
-login callback req with redirect
+login callback req with http post

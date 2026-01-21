@@ -133,7 +133,8 @@ __DATA__
         }
     }
 --- error_code: 200
-
+--- error_log
+login callback req with redirect
 
 
 === TEST 2: login sp1 and sp2, then do single logout
@@ -194,3 +195,5 @@ __DATA__
         }
     }
 --- error_code: 200
+--- error_log
+login callback req with redirect

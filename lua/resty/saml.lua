@@ -154,7 +154,7 @@ end
 
 local AUTHN_REQUEST = [[
 <?xml version="1.0" ?>
-<samlp:AuthnRequest xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" Version="2.0" ID="${uuid}" IssueInstant="${issue_instant}" Destination="${destination}" ProtocolBinding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-GET" AssertionConsumerServiceURL="${acs_url}">
+<samlp:AuthnRequest xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" Version="2.0" ID="${uuid}" IssueInstant="${issue_instant}" Destination="${destination}" ProtocolBinding="urn:oasis:names:tc:SAML:2.0:bindings:${auth_protocol_binding_method}" AssertionConsumerServiceURL="${acs_url}">
   <saml:Issuer Format="urn:oasis:names:tc:SAML:2.0:nameid-format:entity">${issuer}</saml:Issuer>
 </samlp:AuthnRequest>
 ]]
@@ -166,6 +166,7 @@ local function authn_request(opts)
         issue_instant = os.date("!%Y-%m-%dT%TZ"),
         issuer = opts.sp_issuer,
         uuid = generate_saml_id(),
+        auth_protocol_binding_method = opts.auth_protocol_binding_method,
     })
 end
 
@@ -228,6 +229,8 @@ local function login(self, opts)
             value = session_id,
             path = "/",
             httponly = true,
+            samesite = self.samesite,
+            secure = self.secure,
         })
         if not ok then
             ngx.log(ngx.ERR, "cookie:set(): ", err)
@@ -594,6 +597,11 @@ function _M.new(opts)
     saml.key_add_ca_memory(obj.idp_cert_manager, opts.idp_cert)
     obj.key_mngr_from_doc = function(doc) return obj.idp_cert_manager end
     obj.idp_cert_func = function(doc) return idp_cert end
+    obj.auth_protocol_binding_method = opts.auth_protocol_binding_method
+    if obj.auth_protocol_binding_method == "HTTP-POST" then
+        obj.samesite = "None"
+        obj.secure = true
+    end
     return obj
 end
 

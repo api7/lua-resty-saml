@@ -19,5 +19,5 @@ for i in ${!clients[@]}; do
 
 	id=$(kcadm.sh get clients -r test --fields id,clientId 2>/dev/null | jq -r '.[] | select(.clientId=='\"${clients[$i]}\"') | .id')
 
-	kcadm.sh update clients/${id} -r test -s protocol=saml -s frontchannelLogout=true -s rootUrl=${rootUrls[$i]} -s 'redirectUris=["/acs"]' -s 'attributes={"saml.server.signature":"true", "saml.authnstatement":"true", "saml.signature.algorithm":"RSA_SHA256", "saml.client.signature":"true", "saml.force.post.binding":"true", "saml_single_logout_service_url_redirect":"/sls", "saml.signing.certificate":'\"${sp_cert}\"'}'
+	kcadm.sh update clients/${id} -r test -s protocol=saml -s frontchannelLogout=true -s rootUrl=${rootUrls[$i]} -s 'redirectUris=["/acs"]' -s 'attributes={"saml.server.signature":"true", "saml.authnstatement":"true", "saml.signature.algorithm":"RSA_SHA256", "saml.client.signature":"true", "saml_single_logout_service_url_redirect":"/sls", "saml.signing.certificate":'\"${sp_cert}\"'}'
 done

@@ -117,29 +117,57 @@ function _M.login_keycloak(uri, username, password)
         if not res then
             -- No response, must be an error.
             return nil, err
-        elseif res.status ~= 302 then
-            -- Not a redirect which we expect.
-            return nil, "Login form submission did not return redirect to redirect URI."
         end
 
         local keycloak_cookie_str = _M.concatenate_cookies(res.headers['Set-Cookie'])
+        local redirect_uri
 
-        -- login callback
-        local redirect_uri = res.headers['Location']
-        res, err = httpc:request_uri(redirect_uri, {
-            method = "GET",
-            headers = {
-                ["Cookie"] = cookie_str
-            }
-        })
+        -- for HTTP-POST case:
+        if res.status == 200 then
+            local form_action = res.body:match('action="([^"]+)"')
+            local saml_response = res.body:match('name="SAMLResponse" value="([^"]+)"')
+            local relay_state = res.body:match('name="RelayState" value="([^"]+)"')
 
-        if not res then
-            -- No response, must be an error.
-            return nil, err
-        elseif res.status ~= 302 then
-            -- Not a redirect which we expect.
-            return nil, "login callback: " ..
-                "did not return redirect to original URI."
+            if not form_action or not saml_response then
+                return nil, "HTTP-POST response missing form data"
+            end
+
+            -- mock IDP sending respponse to service
+            res, err = httpc:request_uri(form_action, {
+                method = "POST",
+                body = "SAMLResponse=" .. ngx.escape_uri(saml_response) ..
+                       (relay_state and ("&RelayState=" .. ngx.escape_uri(relay_state)) or ""),
+                headers = {
+                    ["Content-Type"] = "application/x-www-form-urlencoded",
+                    ["Cookie"] = cookie_str
+                }
+            })
+
+            if not res then
+                return nil, err
+            elseif res.status ~= 302 then
+                return nil, "ACS POST did not return redirect to original URI"
+            end
+
+        elseif res.status == 302 then
+            redirect_uri = res.headers['Location']
+            res, err = httpc:request_uri(redirect_uri, {
+                method = "GET",
+                headers = {
+                    ["Cookie"] = cookie_str
+                }
+            })
+
+            if not res then
+                -- No response, must be an error.
+                return nil, err
+            elseif res.status ~= 302 then
+                -- Not a redirect which we expect.
+                return nil, "login callback: " ..
+                    "did not return redirect to original URI."
+            end
+        else
+            return nil, "Login form submission returned unexpected status: " .. res.status
         end
 
         cookies = res.headers['Set-Cookie']
@@ -174,26 +202,49 @@ function _M.login_keycloak_for_second_sp(uri, keycloak_cookie_str)
     if not res then
         -- No response, must be an error.
         return nil, err
-    elseif res.status ~= 302 then
-        -- Not a redirect which we expect.
-        return nil, res.body
     end
 
-    -- login callback
-    res, err = httpc:request_uri(res.headers['Location'], {
-        method = "GET",
-        headers = {
-            ["Cookie"] = cookie_str
-        }
-    })
+    if res.status == 200 then
+        local form_action = res.body:match('action="([^"]+)"')
+        local saml_response = res.body:match('name="SAMLResponse" value="([^"]+)"')
+        local relay_state = res.body:match('name="RelayState" value="([^"]+)"')
 
-    if not res then
-        -- No response, must be an error.
-        return nil, err
-    elseif res.status ~= 302 then
-        -- Not a redirect which we expect.
-        return nil, "login callback: " ..
-            "did not return redirect to original URI."
+        if not form_action or not saml_response then
+            return nil, "HTTP-POST response missing form data"
+        end
+
+        res, err = httpc:request_uri(form_action, {
+            method = "POST",
+            body = "SAMLResponse=" .. ngx.escape_uri(saml_response) ..
+                    (relay_state and ("&RelayState=" .. ngx.escape_uri(relay_state)) or ""),
+            headers = {
+                ["Content-Type"] = "application/x-www-form-urlencoded",
+                ["Cookie"] = cookie_str
+            }
+        })
+
+        if not res then
+            return nil, err
+        elseif res.status ~= 302 then
+            return nil, "ACS POST did not return redirect to original URI"
+        end
+    elseif res.status == 302 then
+        -- login callback
+        res, err = httpc:request_uri(res.headers['Location'], {
+            method = "GET",
+            headers = {
+                ["Cookie"] = cookie_str
+            }
+        })
+
+        if not res then
+            -- No response, must be an error.
+            return nil, err
+        elseif res.status ~= 302 then
+            -- Not a redirect which we expect.
+            return nil, "login callback: " ..
+                "did not return redirect to original URI."
+        end
     end
 
     cookies = res.headers['Set-Cookie']

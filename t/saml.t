@@ -59,6 +59,7 @@ _EOC_
                     local kc = require("lib.keycloak")
                     local opts = setmetatable({sp_issuer = sp_issuer}, {__index = kc.get_default_opts()})
                     ngx.log(ngx.INFO, "create sp_issuer=", sp_issuer)
+                    opts.auth_protocol_binding_method = "HTTP-GET"
                     local saml = require("resty.saml").new(opts)
                     samls[sp_issuer] = saml
                 end

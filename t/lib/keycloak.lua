@@ -124,6 +124,7 @@ function _M.login_keycloak(uri, username, password)
 
         -- for HTTP-POST case:
         if res.status == 200 then
+            ngx.log(ngx.INFO, "login callback req with http post")
             local form_action = res.body:match('action="([^"]+)"')
             local saml_response = res.body:match('name="SAMLResponse" value="([^"]+)"')
             local relay_state = res.body:match('name="RelayState" value="([^"]+)"')
@@ -150,6 +151,7 @@ function _M.login_keycloak(uri, username, password)
             end
 
         elseif res.status == 302 then
+            ngx.log(ngx.INFO, "login callback req with redirect")
             redirect_uri = res.headers['Location']
             res, err = httpc:request_uri(redirect_uri, {
                 method = "GET",
@@ -205,6 +207,7 @@ function _M.login_keycloak_for_second_sp(uri, keycloak_cookie_str)
     end
 
     if res.status == 200 then
+        ngx.log(ngx.INFO, "login callback req with http post")
         local form_action = res.body:match('action="([^"]+)"')
         local saml_response = res.body:match('name="SAMLResponse" value="([^"]+)"')
         local relay_state = res.body:match('name="RelayState" value="([^"]+)"')
@@ -229,6 +232,7 @@ function _M.login_keycloak_for_second_sp(uri, keycloak_cookie_str)
             return nil, "ACS POST did not return redirect to original URI"
         end
     elseif res.status == 302 then
+        ngx.log(ngx.INFO, "login callback req with redirect")
         -- login callback
         res, err = httpc:request_uri(res.headers['Location'], {
             method = "GET",

@@ -1,11 +1,11 @@
 local saml = require "saml"
 local uuid = require 'resty.jit-uuid'
 uuid.seed()
-local cjson = require "cjson"
+
 local session = require "resty.session"
 local _M = {}
 local RSA_SHA_512_HREF = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha512"
-local EXPIRED_DATE = "Thu, 01 Jan 1970 00:00:01 GMT"
+
 
 local function create_redirect(key, params)
     local saml_type

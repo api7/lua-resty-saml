@@ -14,7 +14,7 @@ description = {
 dependencies = {
     "api7-lua-resty-http = 0.2.0",
     "lua-resty-jit-uuid = 0.0.7",
-    "lua-resty-cookie = 0.1.0",
+    "lua-resty-cookie = 0.4.1-1",
 }
 
 build = {

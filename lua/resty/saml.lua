@@ -466,7 +466,7 @@ function _M.new(opts)
     obj.auth_protocol_binding_method = opts.auth_protocol_binding_method
     local cookie_secure, cookie_same_site
     if opts.auth_protocol_binding_method == "HTTP-POST" then
-        cookie_secure = false
+        cookie_secure = true
         cookie_same_site = "None"
     end
     obj.session_config = {

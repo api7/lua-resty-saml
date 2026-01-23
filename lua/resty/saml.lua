@@ -294,16 +294,6 @@ local function login_callback(self, opts)
     local attrs = saml.doc_attrs(doc)
     local name_id = saml.doc_name_id(doc)
     local session_index = saml.doc_session_index(doc)
-    local session_expires = saml.doc_session_expires(doc)
-    local expires
-    if session_expires then
-        expires, err = parse_iso8601_utc_time(session_expires)
-        ngx.log(ngx.INFO, "login callback: session_expires=", os.date("%Y-%m-%d %T %z", expires))
-        if err then
-            ngx.say(err)
-            ngx.exit(500)
-        end
-    end
 
     sess:set("authenticated", true)
     sess:set("name_id", name_id)

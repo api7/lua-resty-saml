@@ -2,18 +2,9 @@ local saml = require "saml"
 local uuid = require 'resty.jit-uuid'
 uuid.seed()
 local cjson = require "cjson"
-local ck = require "resty.cookie"
-
+local session = require "resty.session"
 local _M = {}
-
 local RSA_SHA_512_HREF = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha512"
-
-local SESSION_COOKIE_NAME = "saml_session"
-
-local SESSION_SHM = "saml_sessions"
-
-local DEFAULT_COOKIE_LIFETIME = 300 -- in secs
-
 local EXPIRED_DATE = "Thu, 01 Jan 1970 00:00:01 GMT"
 
 local function create_redirect(key, params)
@@ -191,26 +182,27 @@ local function logout_request(opts, name_id, session_index)
 end
 
 local function login(self, opts)
-    local cookie, err = ck:new()
-    if not cookie then
-        ngx.log(ngx.ERR, "cookie:new(): ", err)
-        ngx.exit(500)
+    local sess = session.start(self.session_config)
+
+    local authenticated = sess:get("authenticated")
+    if authenticated then
+        return {
+            authenticated = authenticated,
+            name_id = sess:get("name_id"),
+            session_index = sess:get("session_index"),
+            attrs = sess:get("attrs"),
+            issuer = sess:get("issuer"),
+            request_uri = sess:get("request_uri"),
+            saml_state = sess:get("saml_state"),
+        }
     end
 
-    local session_id = cookie:get(SESSION_COOKIE_NAME)
-
-    if session_id then
-        local data = ngx.shared[SESSION_SHM]:get(session_id)
-        if data then
-            data = cjson.decode(data)
-            if data.authenticated then
-                return data
-            end
-        end
-    end
-
-    local request_uri = ngx.var.request_uri
     local state = uuid.generate_v4()
+    local request_uri = ngx.var.request_uri
+
+    sess:set("saml_state", state)
+    sess:set("request_uri", request_uri)
+    sess:save()
 
     local query_str, err = create_redirect(self.sign_key, {
         SAMLRequest = authn_request(opts),
@@ -222,30 +214,7 @@ local function login(self, opts)
         ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
     end
 
-    if not session_id then
-        session_id = uuid.generate_v4()
-        local ok, err = cookie:set({
-            key = SESSION_COOKIE_NAME,
-            value = session_id,
-            path = "/",
-            httponly = true,
-            samesite = self.samesite,
-            secure = self.secure,
-        })
-        if not ok then
-            ngx.log(ngx.ERR, "cookie:set(): ", err)
-            ngx.exit(500)
-        end
-    end
-
-    local data = {
-        request_uri = request_uri,
-        state = state,
-    }
-    data = cjson.encode(data)
-    ngx.shared[SESSION_SHM]:set(session_id, data, DEFAULT_COOKIE_LIFETIME)
-
-    ngx.log(ngx.INFO, "login start, request_uri=", data.request_uri)
+    ngx.log(ngx.INFO, "login start, request_uri=", request_uri)
 
     return ngx.redirect(opts.idp_uri .. "?" .. query_str)
 end
@@ -284,30 +253,15 @@ local function parse_iso8601_utc_time(str)
 end
 
 local function login_callback(self, opts)
-    local cookie, err = ck:new()
-    if not cookie then
-        ngx.log(ngx.ERR, "cookie:new(): ", err)
-        ngx.exit(500)
-    end
+    local sess = session.start(self.session_config)
 
-    local session_id, err = cookie:get(SESSION_COOKIE_NAME)
-    if err then
-        ngx.log(ngx.ERR, "cookie:get(): ", err)
-        ngx.exit(500)
-    end
-
-    if not session_id then
-        ngx.log(ngx.ERR, "no session found")
+    local saml_state = sess:get("saml_state")
+    if not saml_state then
+        ngx.log(ngx.ERR, "no session found or saml_state missing")
         ngx.exit(503)
     end
 
-    local data = ngx.shared[SESSION_SHM]:get(session_id)
-    if not data then
-        ngx.log(ngx.ERR, "no session found")
-        ngx.exit(503)
-    end
-    data = cjson.decode(data)
-    local request_uri = data.request_uri
+    local request_uri = sess:get("request_uri")
 
     local method = ngx.req.get_method()
     local doc, args, err
@@ -331,8 +285,8 @@ local function login_callback(self, opts)
     end
 
     local state = args.RelayState
-    if state ~= data.state then
-        ngx.log(ngx.ERR, "state different: args.state=", state, ", state=", data.state)
+    if state ~= saml_state then
+        ngx.log(ngx.ERR, "state different: args.state=", state, ", state=", saml_state)
         ngx.exit(ngx.HTTP_UNAUTHORIZED)
     end
 
@@ -341,7 +295,7 @@ local function login_callback(self, opts)
     local name_id = saml.doc_name_id(doc)
     local session_index = saml.doc_session_index(doc)
     local session_expires = saml.doc_session_expires(doc)
-    local expires, lifetime
+    local expires
     if session_expires then
         expires, err = parse_iso8601_utc_time(session_expires)
         ngx.log(ngx.INFO, "login callback: session_expires=", os.date("%Y-%m-%d %T %z", expires))
@@ -349,35 +303,16 @@ local function login_callback(self, opts)
             ngx.say(err)
             ngx.exit(500)
         end
-        lifetime = expires - ngx.time()
-    else
-        lifetime = DEFAULT_COOKIE_LIFETIME
-        expires = ngx.time() + DEFAULT_COOKIE_LIFETIME
     end
 
-    local data = {
-        authenticated = true,
-        name_id = name_id,
-        session_index = session_index,
-        attrs = attrs,
-        issuer = issuer,
-    }
-    data = cjson.encode(data)
-    ngx.shared[SESSION_SHM]:set(session_id, data, lifetime)
+    sess:set("authenticated", true)
+    sess:set("name_id", name_id)
+    sess:set("session_index", session_index)
+    sess:set("attrs", attrs)
+    sess:set("issuer", issuer)
+    sess:save()
 
-    local ok, err = cookie:set({
-        key = SESSION_COOKIE_NAME,
-        value = session_id,
-        path = "/",
-        httponly = true,
-        expires = ngx.cookie_time(expires),
-    })
-    if not ok then
-        ngx.log(ngx.ERR, "cookie:set(): ", err)
-        ngx.exit(500)
-    end
-
-    ngx.log(ngx.INFO, "login finish: data=", cjson.encode(data))
+    ngx.log(ngx.INFO, "login finish: name_id=", name_id)
 
     return ngx.redirect(request_uri)
 end
@@ -403,20 +338,11 @@ local function logout_response(destination, in_response_to, status, issuer)
 end
 
 local function logout_callback(self, opts)
-    local cookie, err = ck:new()
-    if not cookie then
-        ngx.log(ngx.ERR, "cookie:new(): ", err)
-        ngx.exit(500)
-    end
+    local sess = session.start(self.session_config)
+    local authenticated = sess:get("authenticated")
 
-    local session_id, err = cookie:get(SESSION_COOKIE_NAME)
-    if err then
-        ngx.log(ngx.ERR, "cookie:get(): ", err)
-        ngx.exit(500)
-    end
-
-    if not session_id then
-        ngx.log(ngx.ERR, "no session found")
+    if not authenticated then
+        ngx.log(ngx.ERR, "no active session for logout")
         ngx.exit(ngx.HTTP_UNAUTHORIZED)
     end
 
@@ -449,13 +375,6 @@ local function logout_callback(self, opts)
         ngx.exit(ngx.HTTP_BAD_REQUEST)
     end
 
-    local data = ngx.shared[SESSION_SHM]:get(session_id)
-    if not data then
-        ngx.log(ngx.ERR, "no session found")
-        ngx.exit(ngx.HTTP_UNAUTHORIZED)
-    end
-    data = cjson.decode(data)
-
     if name == "LogoutRequest" then
         local issuer = saml.doc_issuer(doc)
         local request_id = saml.doc_id(doc)
@@ -463,28 +382,25 @@ local function logout_callback(self, opts)
         local name_id = saml.doc_name_id(doc)
         local session_index = saml.doc_session_index(doc)
 
-        if issuer ~= data.issuer then
+        local saved_issuer = sess:get("issuer")
+        if issuer ~= saved_issuer then
             ngx.log(ngx.WARN, "issuer different: issuer=", issuer,
-                ", data.issuer=", data.issuer)
+                ", data.issuer=", saved_issuer)
         end
 
-        if name_id ~= data.name_id then
+        local saved_name_id = sess:get("name_id")
+        if name_id ~= saved_name_id then
             ngx.log(ngx.WARN, "name_id different: name_id=", name_id,
-                ", data.name_id=", data.name_id)
+                ", data.name_id=", saved_name_id)
         end
 
-        if session_index ~= data.session_index then
+        local saved_session_index = sess:get("session_index")
+        if session_index ~= saved_session_index then
             ngx.log(ngx.WARN, "session_index different: session_index=",
-                session_index, ", data.session_index=", data.session_index)
+                session_index, ", data.session_index=", saved_session_index)
         end
 
-        cookie:set({
-            key = SESSION_COOKIE_NAME,
-            value = "",
-            expires = EXPIRED_DATE,
-            max_age = 0,
-        })
-        ngx.shared[SESSION_SHM]:delete(session_id)
+        sess:destroy()
 
         local query_str, err = create_redirect(self.sign_key, {
             SAMLResponse = logout_response(opts.idp_uri, request_id, status, opts.sp_issuer),
@@ -495,73 +411,33 @@ local function logout_callback(self, opts)
             ngx.log(ngx.ERR, err)
             ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
         end
-        ngx.log(ngx.INFO, "logout finish: data=", cjson.encode(data))
+        ngx.log(ngx.INFO, "logout finish")
 
         return ngx.redirect(opts.idp_uri .. "?" .. query_str)
-
-        --[[
-        local body, err = create_post(self.sign_key, "SAMLResponse",
-            logout_response(opts.idp_uri, request_id, status, opts.sp_issuer), RSA_SHA_512_HREF, "", opts.idp_uri)
-        if err then
-            ngx.log(ngx.ERR, err)
-            ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
-        end
-
-        ngx.log(ngx.INFO, "logout finish: data=", cjson.encode(data))
-
-        ngx.header.content_type = "text/html"
-        ngx.header.content_length = #body
-        ngx.say(body)
-        return ngx.exit(ngx.HTTP_OK)
-        --]]
     else
         local status_code = saml.doc_status_code(doc)
         if status_code ~= saml.STATUS_SUCCESS then
             ngx.log(ngx.ERR, "IdP returned non-success status: ", status_code)
             ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
         end
-        cookie:set({
-            key = SESSION_COOKIE_NAME,
-            value = "",
-            expires = EXPIRED_DATE,
-            max_age = 0,
-        })
-        ngx.shared[SESSION_SHM]:delete(session_id)
 
-        ngx.log(ngx.INFO, "logout finish: data=", cjson.encode(data))
+        sess:destroy()
+
+        ngx.log(ngx.INFO, "logout finish")
         return ngx.redirect(opts.logout_redirect_uri or "/")
     end
 end
 
 local function logout(self, opts)
-    local cookie, err = ck:new()
-    if not cookie then
-        ngx.log(ngx.ERR, "cookie:new(): ", err)
-        ngx.exit(500)
-    end
+    local sess = session.start(self.session_config)
+    local authenticated = sess:get("authenticated")
 
-    local session_id, err = cookie:get(SESSION_COOKIE_NAME)
-    if err then
-        ngx.log(ngx.ERR, "cookie:get(): ", err)
-        ngx.exit(500)
-    end
-
-    local authenticated = false
-    if session_id then
-        local data = ngx.shared[SESSION_SHM]:get(session_id)
-        if data then
-            data = cjson.decode(data)
-            if data.authenticated then
-                authenticated = true
-            end
-        end
-    end
     if not authenticated then
         ngx.exit(ngx.HTTP_UNAUTHORIZED)
     end
 
     local query_str, err = create_redirect(self.sign_key, {
-        SAMLRequest = logout_request(opts, ngx.shared.name_id, ngx.shared.session_index),
+        SAMLRequest = logout_request(opts, sess:get("name_id"), sess:get("session_index")),
         SigAlg = RSA_SHA_512_HREF,
         RelayState = "",
     })
@@ -598,10 +474,17 @@ function _M.new(opts)
     obj.key_mngr_from_doc = function(doc) return obj.idp_cert_manager end
     obj.idp_cert_func = function(doc) return idp_cert end
     obj.auth_protocol_binding_method = opts.auth_protocol_binding_method
-    if obj.auth_protocol_binding_method == "HTTP-POST" then
-        obj.samesite = "None"
-        obj.secure = true
+    local cookie_secure, cookie_same_site
+    if opts.auth_protocol_binding_method == "HTTP-POST" then
+        cookie_secure = false
+        cookie_same_site = "None"
     end
+    obj.session_config = {
+        cookie_name = "saml_session",
+        secret = opts.secret,
+        cookie_secure = cookie_secure,
+        cookie_same_site = cookie_same_site,
+    }
     return obj
 end
 

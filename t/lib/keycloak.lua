@@ -82,6 +82,7 @@ function _M.login_keycloak(uri, username, password)
     else
         local cookies = res.headers['Set-Cookie']
         local cookie_str = _M.concatenate_cookies(cookies)
+        ngx.log(ngx.INFO, cookies)
 
         res, err = httpc:request_uri(res.headers['Location'], {method = "GET"})
         if not res then

@@ -482,6 +482,7 @@ function _M.new(opts)
     obj.session_config = {
         cookie_name = "saml_session",
         secret = opts.secret,
+        secret_fallbacks = opts.secret_fallbacks,
         cookie_secure = cookie_secure,
         cookie_same_site = cookie_same_site,
     }

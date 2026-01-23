@@ -192,8 +192,6 @@ local function login(self, opts)
             session_index = sess:get("session_index"),
             attrs = sess:get("attrs"),
             issuer = sess:get("issuer"),
-            request_uri = sess:get("request_uri"),
-            saml_state = sess:get("saml_state"),
         }
     end
 

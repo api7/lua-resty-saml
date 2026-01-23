@@ -4,13 +4,11 @@ source = {
     url = "git://github.com/api7/lua-resty-saml",
     tag = "v0.2.4"
 }
-
 description = {
     summary = "SAML 2.0 auth lib for Nginx + Lua",
     homepage = "https://github.com/api7/lua-resty-saml",
     license = "Apache License 2.0",
 }
-
 dependencies = {
     "api7-lua-resty-http = 0.2.0",
     "lua-resty-jit-uuid = 0.0.7",

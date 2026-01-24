@@ -322,6 +322,9 @@ local function login_callback(self, opts)
     sess:set("issuer", issuer)
     sess:set("expires", expires)
 
+    -- clear temporary authentication state no longer needed after successful login
+    sess:set("saml_state", nil)
+    sess:set("request_uri", nil)
     sess:save()
 
     ngx.log(ngx.INFO, "login finish: name_id=", name_id)

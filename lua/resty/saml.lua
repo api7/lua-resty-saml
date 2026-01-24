@@ -5,7 +5,6 @@ uuid.seed()
 local session = require "resty.session"
 local _M = {}
 local RSA_SHA_512_HREF = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha512"
-local DEFAULT_COOKIE_LIFETIME = 300
 
 local function create_redirect(key, params)
     local saml_type
@@ -310,8 +309,6 @@ local function login_callback(self, opts)
             ngx.say(err)
             ngx.exit(500)
         end
-    else
-        expires = ngx.time() + DEFAULT_COOKIE_LIFETIME
     end
 
 

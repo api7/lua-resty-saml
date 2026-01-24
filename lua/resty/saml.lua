@@ -66,6 +66,16 @@ local function get_first(table_or_string)
     return res
 end
 
+local function xml_escape(s)
+    if not s then return "" end
+    s = s:gsub("&", "&amp;")
+    s = s:gsub("<", "&lt;")
+    s = s:gsub(">", "&gt;")
+    s = s:gsub('"', "&quot;")
+    s = s:gsub("'", "&apos;")
+    return s
+end
+
 local function get_first_header(headers, header_name)
     local header = headers[header_name]
     return get_first(header)
@@ -182,11 +192,11 @@ local LOGOUT_REQUEST = [[
 local function logout_request(opts, name_id, session_index)
     return interp(LOGOUT_REQUEST, {
         destination = opts.idp_uri,
-        name_id = name_id,
+        name_id = xml_escape(name_id),
         id = generate_saml_id(),
         issue_instant = os.date("!%Y-%m-%dT%TZ"),
         issuer = opts.sp_issuer,
-        session_index = session_index,
+        session_index = xml_escape(session_index),
     })
 end
 
@@ -371,6 +381,8 @@ local function login_callback(self, opts)
         path = "/",
         httponly = true,
         expires = ngx.cookie_time(expires),
+        samesite = self.samesite,
+        secure = self.secure,
     })
     if not ok then
         ngx.log(ngx.ERR, "cookie:set(): ", err)
@@ -547,8 +559,9 @@ local function logout(self, opts)
     end
 
     local authenticated = false
+    local data
     if session_id then
-        local data = ngx.shared[SESSION_SHM]:get(session_id)
+        data = ngx.shared[SESSION_SHM]:get(session_id)
         if data then
             data = cjson.decode(data)
             if data.authenticated then
@@ -561,7 +574,7 @@ local function logout(self, opts)
     end
 
     local query_str, err = create_redirect(self.sign_key, {
-        SAMLRequest = logout_request(opts, ngx.shared.name_id, ngx.shared.session_index),
+        SAMLRequest = logout_request(opts, data.name_id, data.session_index),
         SigAlg = RSA_SHA_512_HREF,
         RelayState = "",
     })

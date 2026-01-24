@@ -27,10 +27,8 @@ _EOC_
     $block->set_value("main_config", $main_config);
 
     my $http_config = $block->http_config // <<_EOC_;
-    lua_package_path '$pwd/deps/share/lua/5.1/?.lua;$pwd/lua/?.lua;$pwd/t/?.lua;;';
+    lua_package_path '$pwd/lua/?.lua;$pwd/deps/share/lua/5.1/?.lua;$pwd/t/?.lua;;';
     lua_package_cpath '$pwd/?.so;;';
-
-    lua_shared_dict saml_sessions 10m;
 
     init_by_lua_block {
         local saml = require "resty.saml"
@@ -60,6 +58,9 @@ _EOC_
                     local opts = setmetatable({sp_issuer = sp_issuer}, {__index = kc.get_default_opts()})
                     opts.auth_protocol_binding_method = "HTTP-POST"
                     ngx.log(ngx.INFO, "create sp_issuer=", sp_issuer)
+                    opts.session_config = {
+                        secret = "very-secret-key-that-is-32-bytes-long-exact",
+                    }
                     local saml = require("resty.saml").new(opts)
                     samls[sp_issuer] = saml
                 end
@@ -136,6 +137,8 @@ __DATA__
 --- error_code: 200
 --- error_log
 login callback req with http post
+; Path=/; SameSite=None; Secure; HttpOnly,
+
 
 
 === TEST 2: login sp1 and sp2, then do single logout
@@ -198,3 +201,4 @@ login callback req with http post
 --- error_code: 200
 --- error_log
 login callback req with http post
+; Path=/; SameSite=None; Secure; HttpOnly,

@@ -5,7 +5,7 @@ uuid.seed()
 local session = require "resty.session"
 local _M = {}
 local RSA_SHA_512_HREF = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha512"
-
+local DEFAULT_COOKIE_LIFETIME = 300
 
 local function create_redirect(key, params)
     local saml_type
@@ -185,7 +185,16 @@ local function login(self, opts)
     local sess = session.start(self.session_config)
 
     local authenticated = sess:get("authenticated")
-    if authenticated then
+    local expires = sess:get("expires")
+    local expired = false
+    if type(expires) == "number" then
+        local delta = expires - ngx.time()
+        if delta < 0 then
+            expired = true
+        end
+    end
+
+    if authenticated and not expired then
         return {
             authenticated = authenticated,
             name_id = sess:get("name_id"),
@@ -292,12 +301,27 @@ local function login_callback(self, opts)
     local attrs = saml.doc_attrs(doc)
     local name_id = saml.doc_name_id(doc)
     local session_index = saml.doc_session_index(doc)
+    local session_expires = saml.doc_session_expires(doc)
+    local expires
+    if session_expires then
+        expires, err = parse_iso8601_utc_time(session_expires)
+        ngx.log(ngx.INFO, "login callback: session_expires=", os.date("%Y-%m-%d %T %z", expires))
+        if err then
+            ngx.say(err)
+            ngx.exit(500)
+        end
+    else
+        expires = ngx.time() + DEFAULT_COOKIE_LIFETIME
+    end
+
 
     sess:set("authenticated", true)
     sess:set("name_id", name_id)
     sess:set("session_index", session_index)
     sess:set("attrs", attrs)
     sess:set("issuer", issuer)
+    sess:set("expires", expires)
+
     sess:save()
 
     ngx.log(ngx.INFO, "login finish: name_id=", name_id)

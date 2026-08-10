@@ -3,6 +3,43 @@ int saml_doc_validate(xmlDoc* doc) {
 }
 
 
+// Identity is read from the first Assertion in document order, while only one
+// Signature is verified. Keep the two aligned: a verified Response must carry
+// exactly one Assertion anywhere, so the extracted identity is always the
+// signed one.
+int saml_doc_single_assertion(xmlDoc* doc) {
+  xmlNode* root = xmlDocGetRootElement(doc);
+  if (root == NULL) {
+    return 0;
+  }
+
+  // Only responses carry assertions; other message types are unaffected.
+  if (xmlStrEqual(root->name, (xmlChar*)"Response") != 1) {
+    return 1;
+  }
+
+  xmlXPathContext* ctx = xmlXPathNewContext(doc);
+  if (ctx == NULL) {
+    return 0;
+  }
+  if (xmlXPathRegisterNs(ctx, (xmlChar*)"saml", (xmlChar*)SAML_XMLNS_ASSERTION) < 0) {
+    xmlXPathFreeContext(ctx);
+    return 0;
+  }
+
+  xmlXPathObject* obj = xmlXPathEvalExpression((xmlChar*)"//saml:Assertion", ctx);
+  int single = 0;
+  if (obj != NULL && !xmlXPathNodeSetIsEmpty(obj->nodesetval)) {
+    single = obj->nodesetval->nodeNr == 1 ? 1 : 0;
+  }
+  if (obj != NULL) {
+    xmlXPathFreeObject(obj);
+  }
+  xmlXPathFreeContext(ctx);
+  return single;
+}
+
+
 static xmlXPathObject* eval_xpath(xmlDoc* doc, xmlXPathCompExpr* xpath) {
   xmlXPathContext* ctx = xmlXPathNewContext(doc);
   if (ctx == NULL) {

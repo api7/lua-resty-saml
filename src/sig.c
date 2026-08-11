@@ -254,3 +254,113 @@ int saml_verify_doc(xmlSecKeysMngr* mngr, xmlDoc* doc, saml_doc_opts_t* opts) {
   xmlSecDSigCtxDestroy(ctx);
   return status;
 }
+
+
+// Find the element carrying ID=id. Schema validation rejects duplicate xs:ID
+// values, so within a validated document this resolves the same element the
+// signature was verified against.
+static xmlNode* find_by_id(xmlNode* node, const xmlChar* id) {
+  for (; node != NULL; node = node->next) {
+    if (node->type != XML_ELEMENT_NODE) {
+      continue;
+    }
+    xmlChar* value = xmlGetProp(node, (const xmlChar*)"ID");
+    int hit = value != NULL && xmlStrEqual(value, id) == 1;
+    if (value != NULL) {
+      xmlFree(value);
+    }
+    if (hit) {
+      return node;
+    }
+    xmlNode* child = find_by_id(node->children, id);
+    if (child != NULL) {
+      return child;
+    }
+  }
+  return NULL;
+}
+
+
+// The element the verified signature protects, resolved from its Reference URI.
+// Reference URIs are restricted to same-document ("#id") or empty (whole
+// document) forms during verification, so no other shapes are expected here.
+static xmlNode* signed_reference_target(xmlDoc* doc, xmlNode* sig) {
+  xmlNode* ref = xmlSecFindNode(sig, xmlSecNodeReference, xmlSecDSigNs);
+  if (ref == NULL) {
+    return NULL;
+  }
+  xmlChar* uri = xmlGetProp(ref, (const xmlChar*)"URI");
+  xmlNode* target = NULL;
+  if (uri == NULL || uri[0] == '\0') {
+    target = xmlDocGetRootElement(doc);
+  } else if (uri[0] == '#') {
+    xmlAttr* id_attr = xmlGetID(doc, uri + 1);
+    if (id_attr != NULL) {
+      target = id_attr->parent;
+    } else {
+      target = find_by_id(xmlDocGetRootElement(doc), uri + 1);
+    }
+  }
+  if (uri != NULL) {
+    xmlFree(uri);
+  }
+  return target;
+}
+
+
+// saml_verify_doc validates the first Signature in the document but does not
+// confirm that its Reference covers the assertion identity is later read from.
+// Identity comes from an Assertion that is a direct child of the Response, and
+// attributes are read across all such assertions, so the verified signature
+// must cover either the whole Response or that single Assertion. Only
+// successful responses are checked; others carry no identity and may hold no
+// assertion.
+int saml_verified_identity_is_signed(xmlDoc* doc) {
+  xmlNode* root = xmlDocGetRootElement(doc);
+  if (root == NULL) {
+    return 0;
+  }
+  if (xmlStrEqual(root->name, (const xmlChar*)"Response") != 1) {
+    return 1;
+  }
+
+  xmlChar* status = saml_doc_status_code(doc);
+  int success = status != NULL && xmlStrEqual(status, (const xmlChar*)SAML_STATUS_SUCCESS) == 1;
+  if (status != NULL) {
+    xmlFree(status);
+  }
+  if (!success) {
+    return 1;
+  }
+
+  xmlNode* sig = xmlSecFindNode(root, xmlSecNodeSignature, xmlSecDSigNs);
+  if (sig == NULL) {
+    return 0;
+  }
+  xmlNode* target = signed_reference_target(doc, sig);
+  if (target == NULL) {
+    return 0;
+  }
+  if (target == root) {
+    return 1;
+  }
+
+  xmlXPathContext* ctx = xmlXPathNewContext(doc);
+  if (ctx == NULL) {
+    return 0;
+  }
+  if (xmlXPathRegisterNs(ctx, (const xmlChar*)"saml", (const xmlChar*)SAML_XMLNS_ASSERTION) < 0 ||
+      xmlXPathRegisterNs(ctx, (const xmlChar*)"samlp", (const xmlChar*)SAML_XMLNS_PROTOCOL) < 0) {
+    xmlXPathFreeContext(ctx);
+    return 0;
+  }
+
+  xmlXPathObject* obj = xmlXPathEvalExpression((const xmlChar*)"//samlp:Response/saml:Assertion", ctx);
+  int safe = obj != NULL && !xmlXPathNodeSetIsEmpty(obj->nodesetval) &&
+             obj->nodesetval->nodeNr == 1 && obj->nodesetval->nodeTab[0] == target;
+  if (obj != NULL) {
+    xmlXPathFreeObject(obj);
+  }
+  xmlXPathFreeContext(ctx);
+  return safe;
+}

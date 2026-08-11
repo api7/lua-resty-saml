@@ -57,7 +57,7 @@ typedef enum {
   SAML_INVALID_DOC,
   SAML_INVALID_SIG_ALG,
   SAML_INVALID_SIGNATURE,
-  SAML_INVALID_ASSERTIONS,
+  SAML_UNVERIFIED_IDENTITY,
 } saml_binding_status_t;
 
 char* saml_binding_error_msg(saml_binding_status_t status);
@@ -78,7 +78,7 @@ int saml_init(saml_init_opts_t*);
 void saml_shutdown();
 
 int saml_doc_validate(xmlDoc* doc);
-int saml_doc_single_assertion(xmlDoc* doc);
+int saml_verified_identity_is_signed(xmlDoc* doc);
 xmlChar* saml_doc_issuer(xmlDoc* doc);
 xmlChar* saml_doc_name_id(xmlDoc* doc);
 xmlChar* saml_doc_status_code(xmlDoc* doc);

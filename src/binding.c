@@ -43,7 +43,7 @@ static char* ERRORS[] = {
   "document does not validate against schema",
   "invalid signature algorithm",
   "signature does not match",
-  "response must carry exactly one assertion",
+  "response identity is not covered by the signature",
 };
 
 char* saml_binding_error_msg(saml_binding_status_t status) {
@@ -304,8 +304,8 @@ saml_binding_status_t saml_binding_post_verify(xmlSecKeysMngr* mngr, xmlDoc* doc
   if (res < 0) {
     return SAML_XMLSEC_ERROR;
   } else if (res == 0) {
-    if (!saml_doc_single_assertion(doc)) {
-      return SAML_INVALID_ASSERTIONS;
+    if (!saml_verified_identity_is_signed(doc)) {
+      return SAML_UNVERIFIED_IDENTITY;
     }
     return SAML_OK;
   } else {

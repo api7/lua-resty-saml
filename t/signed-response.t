@@ -217,3 +217,43 @@ status: urn:oasis:names:tc:SAML:2.0:status:Requester
     }
 --- response_body
 err: response identity is not covered by the signature
+
+
+
+=== TEST 6: a signed success response with no assertion is rejected
+--- config
+    location /t {
+        content_by_lua_block {
+            local key, mngr, transform = saml_ctx()
+            local signed = sign(key, transform, response(SUCCESS, "resp-1", ""))
+            local doc, err = submit(mngr, signed)
+            if err then ngx.say("err: ", err) else ngx.say("name_id: ", tostring(saml.doc_name_id(doc))) end
+        }
+    }
+--- response_body
+err: response identity is not covered by the signature
+
+
+
+=== TEST 7: a nested non-success status in Extensions cannot relax the check
+--- config
+    location /t {
+        content_by_lua_block {
+            local key, mngr, transform = saml_ctx()
+            local inner = sign(key, transform, response(FAILURE, "inner", ""))
+            local ext = '<samlp:Extensions>' ..
+                assertion("ext", "irrelevant@example.com", "<saml:Advice>" .. inner .. "</saml:Advice>") ..
+                '</samlp:Extensions>'
+            local outer = '<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ' ..
+                'xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="outer" Version="2.0" ' ..
+                'IssueInstant="2026-07-21T00:00:00Z"><saml:Issuer>https://idp.example.com</saml:Issuer>' ..
+                ext ..
+                '<samlp:Status><samlp:StatusCode Value="' .. SUCCESS .. '"/></samlp:Status>' ..
+                assertion("a1", "admin@target.com") ..
+                '</samlp:Response>'
+            local doc, err = submit(mngr, outer)
+            if err then ngx.say("err: ", err) else ngx.say("name_id: ", saml.doc_name_id(doc)) end
+        }
+    }
+--- response_body
+err: response identity is not covered by the signature

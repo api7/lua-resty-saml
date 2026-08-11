@@ -76,22 +76,37 @@ xmlChar* saml_doc_name_id(xmlDoc* doc) {
 }
 
 
+// The direct child of node named name in the protocol namespace, or NULL.
+static xmlNode* protocol_child(xmlNode* node, const xmlChar* name) {
+  for (xmlNode* child = node->children; child != NULL; child = child->next) {
+    if (child->type == XML_ELEMENT_NODE &&
+        xmlStrEqual(child->name, name) == 1 &&
+        child->ns != NULL &&
+        xmlStrEqual(child->ns->href, (const xmlChar*)SAML_XMLNS_PROTOCOL) == 1) {
+      return child;
+    }
+  }
+  return NULL;
+}
+
+
 xmlChar* saml_doc_status_code(xmlDoc* doc) {
-  xmlXPathObject* obj = eval_xpath(doc, XPATH_STATUS_CODE);
-  if (obj == NULL || xmlXPathNodeSetIsEmpty(obj->nodesetval)) {
-    xmlXPathFreeObject(obj);
+  // Read the top-level message's status directly, not a document-wide match:
+  // a nested Response (for example inside saml:Advice) can precede the root
+  // Status in document order and must not be mistaken for it.
+  xmlNode* root = xmlDocGetRootElement(doc);
+  if (root == NULL) {
     return NULL;
   }
-
-  xmlNode* node = obj->nodesetval->nodeTab[0];
-  if (node->type != XML_ATTRIBUTE_NODE) {
-    xmlXPathFreeObject(obj);
+  xmlNode* status = protocol_child(root, (const xmlChar*)"Status");
+  if (status == NULL) {
     return NULL;
   }
-
-  xmlChar* content = xmlNodeListGetString(doc, node->children, 1);
-  xmlXPathFreeObject(obj);
-  return content;
+  xmlNode* code = protocol_child(status, (const xmlChar*)"StatusCode");
+  if (code == NULL) {
+    return NULL;
+  }
+  return xmlGetProp(code, (const xmlChar*)"Value");
 }
 
 xmlChar* saml_doc_session_expires(xmlDoc* doc) {

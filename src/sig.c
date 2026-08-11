@@ -341,23 +341,27 @@ int saml_verified_identity_is_signed(xmlDoc* doc) {
   if (target == NULL) {
     return 0;
   }
-  if (target == root) {
-    return 1;
-  }
 
+  // Identity is read from an Assertion that is a direct child of this Response,
+  // so exactly one must be present (nested assertions elsewhere do not count),
+  // and the verified signature must cover either the whole Response or that
+  // assertion.
   xmlXPathContext* ctx = xmlXPathNewContext(doc);
   if (ctx == NULL) {
     return 0;
   }
-  if (xmlXPathRegisterNs(ctx, (const xmlChar*)"saml", (const xmlChar*)SAML_XMLNS_ASSERTION) < 0 ||
-      xmlXPathRegisterNs(ctx, (const xmlChar*)"samlp", (const xmlChar*)SAML_XMLNS_PROTOCOL) < 0) {
+  if (xmlXPathRegisterNs(ctx, (const xmlChar*)"saml", (const xmlChar*)SAML_XMLNS_ASSERTION) < 0) {
     xmlXPathFreeContext(ctx);
     return 0;
   }
+  ctx->node = root;
 
-  xmlXPathObject* obj = xmlXPathEvalExpression((const xmlChar*)"//samlp:Response/saml:Assertion", ctx);
-  int safe = obj != NULL && !xmlXPathNodeSetIsEmpty(obj->nodesetval) &&
-             obj->nodesetval->nodeNr == 1 && obj->nodesetval->nodeTab[0] == target;
+  xmlXPathObject* obj = xmlXPathEvalExpression((const xmlChar*)"./saml:Assertion", ctx);
+  int safe = 0;
+  if (obj != NULL && !xmlXPathNodeSetIsEmpty(obj->nodesetval) && obj->nodesetval->nodeNr == 1) {
+    xmlNode* assertion = obj->nodesetval->nodeTab[0];
+    safe = target == root || target == assertion;
+  }
   if (obj != NULL) {
     xmlXPathFreeObject(obj);
   }

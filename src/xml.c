@@ -106,7 +106,8 @@ xmlChar* saml_doc_status_code(xmlDoc* doc) {
   if (code == NULL) {
     return NULL;
   }
-  return xmlGetProp(code, (const xmlChar*)"Value");
+  // Value is an unqualified attribute; do not match a namespaced look-alike.
+  return xmlGetNoNsProp(code, (const xmlChar*)"Value");
 }
 
 xmlChar* saml_doc_session_expires(xmlDoc* doc) {

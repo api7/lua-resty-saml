@@ -342,10 +342,12 @@ int saml_verified_identity_is_signed(xmlDoc* doc) {
     return 0;
   }
 
-  // Identity is read from an Assertion that is a direct child of this Response,
-  // so exactly one must be present (nested assertions elsewhere do not count),
-  // and the verified signature must cover either the whole Response or that
-  // assertion.
+  // Identity and attributes are read with document-wide queries, so the whole
+  // document must contain exactly one Assertion, it must be a direct child of
+  // this Response, and the verified signature must cover either the whole
+  // Response or that assertion. This rejects any extra assertion nested
+  // elsewhere (for example a Response placed under Extensions or Advice) that a
+  // document-wide reader could otherwise pick up.
   xmlXPathContext* ctx = xmlXPathNewContext(doc);
   if (ctx == NULL) {
     return 0;
@@ -354,13 +356,12 @@ int saml_verified_identity_is_signed(xmlDoc* doc) {
     xmlXPathFreeContext(ctx);
     return 0;
   }
-  ctx->node = root;
 
-  xmlXPathObject* obj = xmlXPathEvalExpression((const xmlChar*)"./saml:Assertion", ctx);
+  xmlXPathObject* obj = xmlXPathEvalExpression((const xmlChar*)"//saml:Assertion", ctx);
   int safe = 0;
   if (obj != NULL && !xmlXPathNodeSetIsEmpty(obj->nodesetval) && obj->nodesetval->nodeNr == 1) {
     xmlNode* assertion = obj->nodesetval->nodeTab[0];
-    safe = target == root || target == assertion;
+    safe = assertion->parent == root && (target == root || target == assertion);
   }
   if (obj != NULL) {
     xmlXPathFreeObject(obj);

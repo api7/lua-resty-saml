@@ -257,3 +257,36 @@ err: response identity is not covered by the signature
     }
 --- response_body
 err: response identity is not covered by the signature
+
+
+
+=== TEST 8: an assertion under a nested Response cannot shadow the signed one
+--- config
+    location /t {
+        content_by_lua_block {
+            local key, mngr, transform = saml_ctx()
+            -- the genuine, signed assertion sits directly in the outer response
+            local signed = sign(key, transform, assertion("a1", "signed@example.com"))
+            -- a forged assertion is a direct child of a nested Response hidden in
+            -- Extensions, and comes first in document order
+            local nested = '<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ' ..
+                'xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="nested" Version="2.0" ' ..
+                'IssueInstant="2026-07-21T00:00:00Z"><saml:Issuer>https://idp.example.com</saml:Issuer>' ..
+                '<samlp:Status><samlp:StatusCode Value="' .. SUCCESS .. '"/></samlp:Status>' ..
+                assertion("forged", "admin@target.com") .. '</samlp:Response>'
+            local ext = '<samlp:Extensions>' ..
+                assertion("ext", "irrelevant@example.com", "<saml:Advice>" .. nested .. "</saml:Advice>") ..
+                '</samlp:Extensions>'
+            local outer = '<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ' ..
+                'xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="outer" Version="2.0" ' ..
+                'IssueInstant="2026-07-21T00:00:00Z"><saml:Issuer>https://idp.example.com</saml:Issuer>' ..
+                ext ..
+                '<samlp:Status><samlp:StatusCode Value="' .. SUCCESS .. '"/></samlp:Status>' ..
+                signed ..
+                '</samlp:Response>'
+            local doc, err = submit(mngr, outer)
+            if err then ngx.say("err: ", err) else ngx.say("name_id: ", saml.doc_name_id(doc)) end
+        }
+    }
+--- response_body
+err: response identity is not covered by the signature

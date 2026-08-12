@@ -25,7 +25,7 @@
 #include "saml.h"
 
 static const char* XSD_MAIN = "/xsd/saml-schema-protocol-2.0.xsd";
-static xmlXPathCompExpr *XPATH_ATTRIBUTES, *XPATH_NAME_ID, *XPATH_SESSION_INDEX, *XPATH_SESSION_EXPIRES, *XPATH_STATUS_CODE;
+static xmlXPathCompExpr *XPATH_ATTRIBUTES, *XPATH_NAME_ID, *XPATH_SESSION_INDEX, *XPATH_SESSION_EXPIRES, *XPATH_ASSERTIONS;
 static xmlSchemaValidCtxt* XML_SCHEMA_VALIDATE_CTX;
 
 const char* SAML_XMLNS_ASSERTION = "urn:oasis:names:tc:SAML:2.0:assertion";
@@ -65,7 +65,10 @@ int saml_init(saml_init_opts_t* opts) {
   XPATH_NAME_ID = xmlXPathCompile((const xmlChar*)"//samlp:Response/saml:Assertion/saml:Subject/saml:NameID");
   XPATH_SESSION_INDEX = xmlXPathCompile((const xmlChar*)"//samlp:Response/saml:Assertion/saml:AuthnStatement/@SessionIndex");
   XPATH_SESSION_EXPIRES = xmlXPathCompile((const xmlChar*)"//samlp:Response/saml:Assertion/saml:AuthnStatement/@SessionNotOnOrAfter");
-  XPATH_STATUS_CODE = xmlXPathCompile((const xmlChar*)"//samlp:*/samlp:Status/samlp:StatusCode/@Value");
+  // Every assertion the readers above can reach. saml_verified_identity_is_signed
+  // requires the signature to cover all of them, so keep this selector in step
+  // with theirs.
+  XPATH_ASSERTIONS = xmlXPathCompile((const xmlChar*)"//samlp:Response/saml:Assertion");
 
   // https://www.aleksey.com/xmlsec/api/xmlsec-notes-init-shutdown.html
   if (xmlSecInit() < 0) {
@@ -139,6 +142,6 @@ void saml_shutdown() {
   xmlXPathFreeCompExpr(XPATH_NAME_ID);
   xmlXPathFreeCompExpr(XPATH_SESSION_INDEX);
   xmlXPathFreeCompExpr(XPATH_SESSION_EXPIRES);
-  xmlXPathFreeCompExpr(XPATH_STATUS_CODE);
+  xmlXPathFreeCompExpr(XPATH_ASSERTIONS);
   xmlCleanupParser();
 }

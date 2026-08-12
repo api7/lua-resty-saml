@@ -120,6 +120,12 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
                 id, name_id, extra or "")
         end
 
+        function attribute(name, value)
+            return string.format('<saml:AttributeStatement><saml:Attribute Name="%s">' ..
+                '<saml:AttributeValue>%s</saml:AttributeValue>' ..
+                '</saml:Attribute></saml:AttributeStatement>', name, value)
+        end
+
         function submit(mngr, xml)
             return saml.binding_post_parse(saml.base64_encode(xml), function(_) return mngr end)
         end
@@ -290,3 +296,105 @@ err: response identity is not covered by the signature
     }
 --- response_body
 err: response identity is not covered by the signature
+
+
+
+=== TEST 9: a whole-response signature covers every assertion it carries
+--- config
+    location /t {
+        content_by_lua_block {
+            local key, mngr, transform = saml_ctx()
+            local a1 = assertion("a1", "signed@example.com", attribute("email", "signed@example.com"))
+            local a2 = assertion("a2", "signed@example.com", attribute("role", "admin"))
+            local signed = sign(key, transform, response(SUCCESS, "resp-1", a1 .. a2))
+            local doc, err = submit(mngr, signed)
+            if err then
+                ngx.say("err: ", err)
+            else
+                local attrs = saml.doc_attrs(doc)
+                ngx.say("name_id: ", saml.doc_name_id(doc),
+                    ", email: ", attrs.email, ", role: ", attrs.role)
+            end
+        }
+    }
+--- response_body
+name_id: signed@example.com, email: signed@example.com, role: admin
+
+
+
+=== TEST 10: an assertion-level signature cannot vouch for a second assertion
+--- config
+    location /t {
+        content_by_lua_block {
+            local key, mngr, transform = saml_ctx()
+            local signed = sign(key, transform, assertion("a1", "signed@example.com"))
+            local forged = assertion("a2", "admin@target.com", attribute("role", "admin"))
+            local resp = response(SUCCESS, "resp-1", signed .. forged)
+            local doc, err = submit(mngr, resp)
+            if err then ngx.say("err: ", err) else ngx.say("name_id: ", saml.doc_name_id(doc)) end
+        }
+    }
+--- response_body
+err: response identity is not covered by the signature
+
+
+
+=== TEST 11: an assertion carrying Advice is trusted
+--- config
+    location /t {
+        content_by_lua_block {
+            local key, mngr, transform = saml_ctx()
+            local advice = "<saml:Advice>" .. assertion("adv", "advice@example.com") .. "</saml:Advice>"
+            local signed = sign(key, transform, assertion("a1", "signed@example.com", advice))
+            local doc, err = submit(mngr, response(SUCCESS, "resp-1", signed))
+            if err then ngx.say("err: ", err) else ngx.say("name_id: ", saml.doc_name_id(doc)) end
+        }
+    }
+--- response_body
+name_id: signed@example.com
+
+
+
+=== TEST 12: a signed assertion in Extensions cannot cover the read assertion
+--- config
+    location /t {
+        content_by_lua_block {
+            local key, mngr, transform = saml_ctx()
+            -- a genuine assertion the attacker owns, parked where no reader looks
+            local stolen = sign(key, transform, assertion("stolen", "attacker@example.com"))
+            local outer = '<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ' ..
+                'xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="outer" Version="2.0" ' ..
+                'IssueInstant="2026-07-21T00:00:00Z"><saml:Issuer>https://idp.example.com</saml:Issuer>' ..
+                '<samlp:Extensions>' .. stolen .. '</samlp:Extensions>' ..
+                '<samlp:Status><samlp:StatusCode Value="' .. SUCCESS .. '"/></samlp:Status>' ..
+                assertion("a1", "admin@target.com") ..
+                '</samlp:Response>'
+            local doc, err = submit(mngr, outer)
+            if err then ngx.say("err: ", err) else ngx.say("name_id: ", saml.doc_name_id(doc)) end
+        }
+    }
+--- response_body
+err: response identity is not covered by the signature
+
+
+
+=== TEST 13: a LogoutResponse status is read from the root message
+--- config
+    location /t {
+        content_by_lua_block {
+            local key, mngr, transform = saml_ctx()
+            local logout = '<samlp:LogoutResponse xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ' ..
+                'xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="lr-1" Version="2.0" ' ..
+                'IssueInstant="2026-07-21T00:00:00Z"><saml:Issuer>https://idp.example.com</saml:Issuer>' ..
+                '<samlp:Status><samlp:StatusCode Value="' .. SUCCESS .. '"/></samlp:Status>' ..
+                '</samlp:LogoutResponse>'
+            local doc, err = submit(mngr, sign(key, transform, logout))
+            if err then
+                ngx.say("err: ", err)
+            else
+                ngx.say(saml.doc_root_name(doc), ": ", saml.doc_status_code(doc))
+            end
+        }
+    }
+--- response_body
+LogoutResponse: urn:oasis:names:tc:SAML:2.0:status:Success

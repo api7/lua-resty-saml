@@ -12,6 +12,7 @@ jobs:
     runs-on: "ubuntu-latest"
     env:
       OPENRESTY_PREFIX: "/usr/local/openresty"
+      OPENSSL_DIR: "/usr/local/openresty/openssl3"
 
     steps:
       - uses: actions/checkout@v2
@@ -24,7 +25,9 @@ jobs:
           wget -O - https://openresty.org/package/pubkey.gpg | sudo apt-key add -
           echo "deb http://openresty.org/package/ubuntu $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/openresty.list
           sudo apt-get update
-          sudo apt-get -y install openresty openresty-openssl111-dev
+          # openresty already depends on openresty-openssl3, so build against that
+          # rather than pulling the separate openssl111 packages
+          sudo apt-get -y install openresty openresty-openssl3-dev
 
           # Test::Nginx
           sudo cpanm --notest Test::Nginx > build.log 2>&1 || (cat build.log && exit 1)

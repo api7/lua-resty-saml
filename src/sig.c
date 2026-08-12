@@ -254,3 +254,68 @@ int saml_verify_doc(xmlSecKeysMngr* mngr, xmlDoc* doc, saml_doc_opts_t* opts) {
   xmlSecDSigCtxDestroy(ctx);
   return status;
 }
+
+
+// The element the verified signature protects, resolved from its Reference URI.
+// Verification restricts Reference URIs to same-document ("#id") or whole-
+// document (empty) forms, so no other shape is expected. A "#id" libxml2 cannot
+// resolve is treated as covering nothing: verification just succeeded through
+// the same ID table, so a miss here means the safe reading is no coverage.
+static xmlNode* signed_reference_target(xmlDoc* doc, xmlNode* sig) {
+  xmlNode* ref = xmlSecFindNode(sig, xmlSecNodeReference, xmlSecDSigNs);
+  if (ref == NULL) {
+    return NULL;
+  }
+  xmlChar* uri = xmlGetProp(ref, (const xmlChar*)"URI");
+  xmlNode* target = NULL;
+  if (uri == NULL || uri[0] == '\0') {
+    target = xmlDocGetRootElement(doc);
+  } else if (uri[0] == '#') {
+    xmlAttr* id_attr = xmlGetID(doc, uri + 1);
+    if (id_attr != NULL) {
+      target = id_attr->parent;
+    }
+  }
+  if (uri != NULL) {
+    xmlFree(uri);
+  }
+  return target;
+}
+
+
+static int is_saml_assertion(xmlNode* node) {
+  return node->type == XML_ELEMENT_NODE &&
+    xmlStrEqual(node->name, (const xmlChar*)"Assertion") == 1 &&
+    node->ns != NULL &&
+    xmlStrEqual(node->ns->href, (const xmlChar*)SAML_XMLNS_ASSERTION) == 1;
+}
+
+
+// Identity is read from /samlp:Response/saml:Assertion, i.e. only from an
+// assertion that is a direct child of the verified root message. saml_verify_doc
+// checks one Signature but not that its Reference covers the assertion a reader
+// will pick, so remove every top-level assertion that signature does not cover:
+// a whole-message signature (target is the root) covers all of them; otherwise
+// only the single assertion it directly references may remain, and every other
+// top-level assertion is unsigned and dropped. The removed nodes are siblings,
+// so freeing one never dangles another.
+static void confine_identity_to_signature(xmlDoc* doc) {
+  xmlNode* root = xmlDocGetRootElement(doc);
+  if (root == NULL) {
+    return;
+  }
+  xmlNode* sig = xmlSecFindNode(root, xmlSecNodeSignature, xmlSecDSigNs);
+  xmlNode* target = sig == NULL ? NULL : signed_reference_target(doc, sig);
+  if (target == root) {
+    return;
+  }
+  xmlNode* child = root->children;
+  while (child != NULL) {
+    xmlNode* next = child->next;
+    if (is_saml_assertion(child) && child != target) {
+      xmlUnlinkNode(child);
+      xmlFreeNode(child);
+    }
+    child = next;
+  }
+}

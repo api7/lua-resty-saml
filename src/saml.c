@@ -61,10 +61,14 @@ static void saml_log(char* msg) {
 int saml_init(saml_init_opts_t* opts) {
   xmlInitParser();
 
-  XPATH_ATTRIBUTES = xmlXPathCompile((const xmlChar*)"//samlp:Response/saml:Assertion/saml:AttributeStatement/saml:Attribute");
-  XPATH_NAME_ID = xmlXPathCompile((const xmlChar*)"//samlp:Response/saml:Assertion/saml:Subject/saml:NameID");
-  XPATH_SESSION_INDEX = xmlXPathCompile((const xmlChar*)"//samlp:Response/saml:Assertion/saml:AuthnStatement/@SessionIndex");
-  XPATH_SESSION_EXPIRES = xmlXPathCompile((const xmlChar*)"//samlp:Response/saml:Assertion/saml:AuthnStatement/@SessionNotOnOrAfter");
+  // Identity is read only from an assertion that is a direct child of the root
+  // Response (single leading slash), never from one nested elsewhere in the
+  // document. confine_identity_to_signature then drops any top-level assertion
+  // the verified signature does not cover.
+  XPATH_ATTRIBUTES = xmlXPathCompile((const xmlChar*)"/samlp:Response/saml:Assertion/saml:AttributeStatement/saml:Attribute");
+  XPATH_NAME_ID = xmlXPathCompile((const xmlChar*)"/samlp:Response/saml:Assertion/saml:Subject/saml:NameID");
+  XPATH_SESSION_INDEX = xmlXPathCompile((const xmlChar*)"/samlp:Response/saml:Assertion/saml:AuthnStatement/@SessionIndex");
+  XPATH_SESSION_EXPIRES = xmlXPathCompile((const xmlChar*)"/samlp:Response/saml:Assertion/saml:AuthnStatement/@SessionNotOnOrAfter");
   XPATH_STATUS_CODE = xmlXPathCompile((const xmlChar*)"//samlp:*/samlp:Status/samlp:StatusCode/@Value");
 
   // https://www.aleksey.com/xmlsec/api/xmlsec-notes-init-shutdown.html

@@ -12,7 +12,6 @@ jobs:
     runs-on: "ubuntu-latest"
     env:
       OPENRESTY_PREFIX: "/usr/local/openresty"
-      OPENSSL_DIR: "/usr/local/openresty/openssl3"
 
     steps:
       - uses: actions/checkout@v2
@@ -25,9 +24,16 @@ jobs:
           wget -O - https://openresty.org/package/pubkey.gpg | sudo apt-key add -
           echo "deb http://openresty.org/package/ubuntu $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/openresty.list
           sudo apt-get update
-          # openresty already depends on openresty-openssl3, so build against that
-          # rather than pulling the separate openssl111 packages
-          sudo apt-get -y install openresty openresty-openssl3-dev
+          # openresty.org serves intermittent 500s, so keep trying
+          for i in 1 2 3 4 5; do
+            if sudo apt-get -y -o Acquire::Retries=10 install openresty openresty-openssl111-dev; then
+              installed=1
+              break
+            fi
+            echo "attempt $i to install openresty failed, retrying"
+            sleep 20
+          done
+          [ "${installed:-}" = 1 ] || { echo "could not install openresty"; exit 1; }
 
           # Test::Nginx
           sudo cpanm --notest Test::Nginx > build.log 2>&1 || (cat build.log && exit 1)

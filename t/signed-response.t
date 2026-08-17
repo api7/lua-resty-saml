@@ -496,3 +496,64 @@ name_id: first@example.com, dept: eng, role: ops
     }
 --- response_body
 name_id: signed@example.com
+
+
+
+=== TEST 18: the issuer comes from the assertion, not the unsigned Response
+--- config
+    location /t {
+        content_by_lua_block {
+            local key, mngr, transform = saml_ctx()
+            -- the signature covers the assertion only, so the Response around
+            -- it, its own Issuer included, is the attacker's to write
+            local signed = sign(key, transform, assertion("a1", "signed@example.com"))
+            local outer = '<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ' ..
+                'xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="resp-1" Version="2.0" ' ..
+                'IssueInstant="2026-07-21T00:00:00Z">' ..
+                '<saml:Issuer>https://attacker.example.com</saml:Issuer>' ..
+                '<samlp:Status><samlp:StatusCode Value="' .. SUCCESS .. '"/></samlp:Status>' ..
+                signed .. '</samlp:Response>'
+            local doc, err = submit(mngr, outer)
+            if err then ngx.say("err: ", err) else ngx.say("issuer: ", tostring(saml.doc_issuer(doc))) end
+        }
+    }
+--- response_body
+issuer: https://idp.example.com
+
+
+
+=== TEST 19: a whole-response signature reads the same issuer
+--- config
+    location /t {
+        content_by_lua_block {
+            local key, mngr, transform = saml_ctx()
+            local resp = response(SUCCESS, "resp-1", assertion("a1", "signed@example.com"))
+            local doc, err = submit(mngr, sign(key, transform, resp))
+            if err then ngx.say("err: ", err) else ngx.say("issuer: ", tostring(saml.doc_issuer(doc))) end
+        }
+    }
+--- response_body
+issuer: https://idp.example.com
+
+
+
+=== TEST 20: a message carrying no assertion reads its own issuer
+--- config
+    location /t {
+        content_by_lua_block {
+            local key, mngr, transform = saml_ctx()
+            local logout = '<samlp:LogoutResponse xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ' ..
+                'xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="lr-1" Version="2.0" ' ..
+                'IssueInstant="2026-07-21T00:00:00Z"><saml:Issuer>https://idp.example.com</saml:Issuer>' ..
+                '<samlp:Status><samlp:StatusCode Value="' .. SUCCESS .. '"/></samlp:Status>' ..
+                '</samlp:LogoutResponse>'
+            local doc, err = submit(mngr, sign(key, transform, logout))
+            if err then
+                ngx.say("err: ", err)
+            else
+                ngx.say(saml.doc_root_name(doc), " issuer: ", tostring(saml.doc_issuer(doc)))
+            end
+        }
+    }
+--- response_body
+LogoutResponse issuer: https://idp.example.com

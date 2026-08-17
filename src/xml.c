@@ -25,20 +25,51 @@ static xmlXPathObject* eval_xpath(xmlDoc* doc, xmlXPathCompExpr* xpath) {
 }
 
 
+static int is_saml_assertion(xmlNode* node) {
+  return node->type == XML_ELEMENT_NODE &&
+    xmlStrEqual(node->name, (const xmlChar*)"Assertion") == 1 &&
+    node->ns != NULL &&
+    xmlStrEqual(node->ns->href, (const xmlChar*)SAML_XMLNS_ASSERTION) == 1;
+}
+
+
+// The text of node's own Issuer child, or NULL. Issuer is in the assertion
+// namespace wherever it appears, so a look-alike in another one is not it.
+static xmlChar* issuer_of(xmlDoc* doc, xmlNode* node) {
+  for (xmlNode* child = node->children; child != NULL; child = child->next) {
+    if (child->type == XML_ELEMENT_NODE &&
+        xmlStrEqual(child->name, (const xmlChar*)"Issuer") == 1 &&
+        child->ns != NULL &&
+        xmlStrEqual(child->ns->href, (const xmlChar*)SAML_XMLNS_ASSERTION) == 1) {
+      return xmlNodeListGetString(doc, child->children, 1);
+    }
+  }
+  return NULL;
+}
+
+
+// A Response's issuer is read from its assertion, the element the identity
+// itself comes from. The Response's own Issuer sits outside an assertion-level
+// signature and can be rewritten without breaking it, while every top-level
+// assertion still in the document is one the signature covers. Other messages
+// carry no assertion and are signed whole, so their own Issuer is the one to
+// read.
 xmlChar* saml_doc_issuer(xmlDoc* doc) {
-  xmlNode* node = xmlDocGetRootElement(doc);
-  if (node == NULL) {
+  xmlNode* root = xmlDocGetRootElement(doc);
+  if (root == NULL) {
     return NULL;
   }
 
-  node = node->children;
-  while (node != NULL) {
-    if (xmlStrEqual(node->name, (xmlChar*)"Issuer") == 1) {
-      return xmlNodeListGetString(doc, node->children, 1);
+  if (xmlStrEqual(root->name, (const xmlChar*)"Response") == 1) {
+    for (xmlNode* child = root->children; child != NULL; child = child->next) {
+      if (is_saml_assertion(child)) {
+        return issuer_of(doc, child);
+      }
     }
-    node = node->next;
+    return NULL;
   }
-  return NULL;
+
+  return issuer_of(doc, root);
 }
 
 

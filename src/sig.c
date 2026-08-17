@@ -339,14 +339,6 @@ static int signature_covers(xmlDoc* doc, xmlNode* sig, xmlNode* node) {
 }
 
 
-static int is_saml_assertion(xmlNode* node) {
-  return node->type == XML_ELEMENT_NODE &&
-    xmlStrEqual(node->name, (const xmlChar*)"Assertion") == 1 &&
-    node->ns != NULL &&
-    xmlStrEqual(node->ns->href, (const xmlChar*)SAML_XMLNS_ASSERTION) == 1;
-}
-
-
 // Identity is read from /samlp:Response/saml:Assertion, i.e. only from an
 // assertion that is a direct child of the verified root message. saml_verify_doc
 // checks one Signature but not that it covers the assertion a reader will pick,

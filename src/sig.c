@@ -257,11 +257,10 @@ int saml_verify_doc(xmlSecKeysMngr* mngr, xmlDoc* doc, saml_doc_opts_t* opts) {
 
 
 // The element the verified signature protects, resolved from its Reference URI.
-// Reference URIs are restricted to same-document ("#id") or empty (whole
-// document) forms during verification, so no other shapes are expected here.
-// A "#id" that libxml2 cannot resolve is treated as covering nothing: the
-// verification that just succeeded went through the same ID table, so a miss
-// here means the two disagree and the safe reading is no coverage.
+// Verification restricts Reference URIs to same-document ("#id") or whole-
+// document (empty) forms, so no other shape is expected. A "#id" libxml2 cannot
+// resolve is treated as covering nothing: verification just succeeded through
+// the same ID table, so a miss here means the safe reading is no coverage.
 static xmlNode* signed_reference_target(xmlDoc* doc, xmlNode* sig) {
   xmlNode* ref = xmlSecFindNode(sig, xmlSecNodeReference, xmlSecDSigNs);
   if (ref == NULL) {
@@ -284,68 +283,39 @@ static xmlNode* signed_reference_target(xmlDoc* doc, xmlNode* sig) {
 }
 
 
-static int is_success_response(xmlDoc* doc) {
-  xmlChar* status = saml_doc_status_code(doc);
-  int success = status != NULL && xmlStrEqual(status, (const xmlChar*)SAML_STATUS_SUCCESS) == 1;
-  if (status != NULL) {
-    xmlFree(status);
-  }
-  return success;
+static int is_saml_assertion(xmlNode* node) {
+  return node->type == XML_ELEMENT_NODE &&
+    xmlStrEqual(node->name, (const xmlChar*)"Assertion") == 1 &&
+    node->ns != NULL &&
+    xmlStrEqual(node->ns->href, (const xmlChar*)SAML_XMLNS_ASSERTION) == 1;
 }
 
 
-// saml_verify_doc validates the first Signature in the document but does not
-// confirm that its Reference covers the assertions identity is later read from.
-// Those readers select //samlp:Response/saml:Assertion, and saml_doc_attrs
-// reads every match rather than the first, so each assertion in that set must
-// belong to this Response and be covered by the verified signature.
-int saml_verified_identity_is_signed(xmlDoc* doc) {
+// Identity is read from /samlp:Response/saml:Assertion, i.e. only from an
+// assertion that is a direct child of the verified root message. saml_verify_doc
+// checks one Signature but not that its Reference covers the assertion a reader
+// will pick, so remove every top-level assertion that signature does not cover:
+// a whole-message signature (target is the root) covers all of them; otherwise
+// only the single assertion it directly references may remain, and every other
+// top-level assertion is unsigned and dropped. The removed nodes are siblings,
+// so freeing one never dangles another.
+static void confine_identity_to_signature(xmlDoc* doc) {
   xmlNode* root = xmlDocGetRootElement(doc);
   if (root == NULL) {
-    return 0;
+    return;
   }
-  if (xmlStrEqual(root->name, (const xmlChar*)"Response") != 1) {
-    return 1;
-  }
-
-  xmlXPathObject* obj = eval_xpath(doc, XPATH_ASSERTIONS);
-  if (obj == NULL) {
-    return 0;
-  }
-  int count = xmlXPathNodeSetIsEmpty(obj->nodesetval) ? 0 : obj->nodesetval->nodeNr;
-
-  // Nothing to read means nothing to spoof, except on a successful response:
-  // callers treat that as a session without an identity.
-  if (count == 0) {
-    xmlXPathFreeObject(obj);
-    return is_success_response(doc) ? 0 : 1;
-  }
-
-  // An assertion under a nested Response is readable but is not this
-  // Response's identity, so it can never stand in for one.
-  for (int i = 0; i < count; i++) {
-    if (obj->nodesetval->nodeTab[i]->parent != root) {
-      xmlXPathFreeObject(obj);
-      return 0;
-    }
-  }
-
   xmlNode* sig = xmlSecFindNode(root, xmlSecNodeSignature, xmlSecDSigNs);
   xmlNode* target = sig == NULL ? NULL : signed_reference_target(doc, sig);
-
-  int safe;
   if (target == root) {
-    // An enveloped signature over the Response digests every assertion in it,
-    // however many there are.
-    safe = 1;
-  } else if (target == NULL) {
-    safe = 0;
-  } else {
-    // An assertion-level signature covers one assertion, so it has to be the
-    // only one a reader can reach.
-    safe = count == 1 && target == obj->nodesetval->nodeTab[0];
+    return;
   }
-
-  xmlXPathFreeObject(obj);
-  return safe;
+  xmlNode* child = root->children;
+  while (child != NULL) {
+    xmlNode* next = child->next;
+    if (is_saml_assertion(child) && child != target) {
+      xmlUnlinkNode(child);
+      xmlFreeNode(child);
+    }
+    child = next;
+  }
 }

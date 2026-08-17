@@ -25,7 +25,7 @@
 #include "saml.h"
 
 static const char* XSD_MAIN = "/xsd/saml-schema-protocol-2.0.xsd";
-static xmlXPathCompExpr *XPATH_ATTRIBUTES, *XPATH_NAME_ID, *XPATH_SESSION_INDEX, *XPATH_SESSION_EXPIRES, *XPATH_ASSERTIONS;
+static xmlXPathCompExpr *XPATH_ATTRIBUTES, *XPATH_NAME_ID, *XPATH_SESSION_INDEX, *XPATH_SESSION_EXPIRES;
 static xmlSchemaValidCtxt* XML_SCHEMA_VALIDATE_CTX;
 
 const char* SAML_XMLNS_ASSERTION = "urn:oasis:names:tc:SAML:2.0:assertion";
@@ -61,14 +61,14 @@ static void saml_log(char* msg) {
 int saml_init(saml_init_opts_t* opts) {
   xmlInitParser();
 
-  XPATH_ATTRIBUTES = xmlXPathCompile((const xmlChar*)"//samlp:Response/saml:Assertion/saml:AttributeStatement/saml:Attribute");
-  XPATH_NAME_ID = xmlXPathCompile((const xmlChar*)"//samlp:Response/saml:Assertion/saml:Subject/saml:NameID");
-  XPATH_SESSION_INDEX = xmlXPathCompile((const xmlChar*)"//samlp:Response/saml:Assertion/saml:AuthnStatement/@SessionIndex");
-  XPATH_SESSION_EXPIRES = xmlXPathCompile((const xmlChar*)"//samlp:Response/saml:Assertion/saml:AuthnStatement/@SessionNotOnOrAfter");
-  // Every assertion the readers above can reach. saml_verified_identity_is_signed
-  // requires the signature to cover all of them, so keep this selector in step
-  // with theirs.
-  XPATH_ASSERTIONS = xmlXPathCompile((const xmlChar*)"//samlp:Response/saml:Assertion");
+  // Identity is read only from an assertion that is a direct child of the root
+  // Response (single leading slash), never from one nested elsewhere in the
+  // document. confine_identity_to_signature then drops any top-level assertion
+  // the verified signature does not cover.
+  XPATH_ATTRIBUTES = xmlXPathCompile((const xmlChar*)"/samlp:Response/saml:Assertion/saml:AttributeStatement/saml:Attribute");
+  XPATH_NAME_ID = xmlXPathCompile((const xmlChar*)"/samlp:Response/saml:Assertion/saml:Subject/saml:NameID");
+  XPATH_SESSION_INDEX = xmlXPathCompile((const xmlChar*)"/samlp:Response/saml:Assertion/saml:AuthnStatement/@SessionIndex");
+  XPATH_SESSION_EXPIRES = xmlXPathCompile((const xmlChar*)"/samlp:Response/saml:Assertion/saml:AuthnStatement/@SessionNotOnOrAfter");
 
   // https://www.aleksey.com/xmlsec/api/xmlsec-notes-init-shutdown.html
   if (xmlSecInit() < 0) {
@@ -142,6 +142,5 @@ void saml_shutdown() {
   xmlXPathFreeCompExpr(XPATH_NAME_ID);
   xmlXPathFreeCompExpr(XPATH_SESSION_INDEX);
   xmlXPathFreeCompExpr(XPATH_SESSION_EXPIRES);
-  xmlXPathFreeCompExpr(XPATH_ASSERTIONS);
   xmlCleanupParser();
 }

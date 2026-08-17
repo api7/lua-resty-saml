@@ -129,6 +129,14 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
         function submit(mngr, xml)
             return saml.binding_post_parse(saml.base64_encode(xml), function(_) return mngr end)
         end
+
+        -- The identity read back is only ever the genuinely signed subject or
+        -- nil; a forged admin identity must never surface.
+        function identity(mngr, xml)
+            local doc, err = submit(mngr, xml)
+            if err then return "err: " .. err end
+            return "name_id: " .. tostring(saml.doc_name_id(doc))
+        end
     }
 _EOC_
 
@@ -145,9 +153,7 @@ __DATA__
         content_by_lua_block {
             local key, mngr, transform = saml_ctx()
             local signed = sign(key, transform, assertion("a1", "signed@example.com"))
-            local resp = response(SUCCESS, "resp-1", signed)
-            local doc, err = submit(mngr, resp)
-            if err then ngx.say("err: ", err) else ngx.say("name_id: ", saml.doc_name_id(doc)) end
+            ngx.say(identity(mngr, response(SUCCESS, "resp-1", signed)))
         }
     }
 --- response_body
@@ -155,20 +161,18 @@ name_id: signed@example.com
 
 
 
-=== TEST 2: a second, unsigned assertion in front of the signed one is rejected
+=== TEST 2: a forged assertion in front of the signed one is dropped, not read
 --- config
     location /t {
         content_by_lua_block {
             local key, mngr, transform = saml_ctx()
             local signed = sign(key, transform, assertion("a1", "signed@example.com"))
             local forged = assertion("a2", "admin@target.com")
-            local resp = response(SUCCESS, "resp-1", forged .. signed)
-            local doc, err = submit(mngr, resp)
-            if err then ngx.say("err: ", err) else ngx.say("name_id: ", saml.doc_name_id(doc)) end
+            ngx.say(identity(mngr, response(SUCCESS, "resp-1", forged .. signed)))
         }
     }
 --- response_body
-err: response identity is not covered by the signature
+name_id: signed@example.com
 
 
 
@@ -178,9 +182,7 @@ err: response identity is not covered by the signature
         content_by_lua_block {
             local key, mngr, transform = saml_ctx()
             local resp = response(SUCCESS, "resp-1", assertion("a1", "signed@example.com"))
-            local signed_resp = sign(key, transform, resp)
-            local doc, err = submit(mngr, signed_resp)
-            if err then ngx.say("err: ", err) else ngx.say("name_id: ", saml.doc_name_id(doc)) end
+            ngx.say(identity(mngr, sign(key, transform, resp)))
         }
     }
 --- response_body
@@ -188,19 +190,14 @@ name_id: signed@example.com
 
 
 
-=== TEST 4: a signed non-success response with no assertion is accepted
+=== TEST 4: a signed non-success response with no assertion reads its status
 --- config
     location /t {
         content_by_lua_block {
             local key, mngr, transform = saml_ctx()
-            local resp = response(FAILURE, "resp-1", "")
-            local signed_resp = sign(key, transform, resp)
+            local signed_resp = sign(key, transform, response(FAILURE, "resp-1", ""))
             local doc, err = submit(mngr, signed_resp)
-            if err then
-                ngx.say("err: ", err)
-            else
-                ngx.say("status: ", saml.doc_status_code(doc))
-            end
+            if err then ngx.say("err: ", err) else ngx.say("status: ", saml.doc_status_code(doc)) end
         }
     }
 --- response_body
@@ -208,7 +205,7 @@ status: urn:oasis:names:tc:SAML:2.0:status:Requester
 
 
 
-=== TEST 5: a signed assertion-free response nested in Advice is rejected
+=== TEST 5: a forged assertion whose Advice holds a signed inner response is dropped
 --- config
     location /t {
         content_by_lua_block {
@@ -216,32 +213,28 @@ status: urn:oasis:names:tc:SAML:2.0:status:Requester
             local inner = sign(key, transform, response(FAILURE, "inner", ""))
             local forged = assertion("a1", "admin@target.com",
                 "<saml:Advice>" .. inner .. "</saml:Advice>")
-            local resp = response(SUCCESS, "outer", forged)
-            local doc, err = submit(mngr, resp)
-            if err then ngx.say("err: ", err) else ngx.say("name_id: ", saml.doc_name_id(doc)) end
+            ngx.say(identity(mngr, response(SUCCESS, "outer", forged)))
         }
     }
 --- response_body
-err: response identity is not covered by the signature
+name_id: nil
 
 
 
-=== TEST 6: a signed success response with no assertion is rejected
+=== TEST 6: a signed success response with no assertion yields no identity
 --- config
     location /t {
         content_by_lua_block {
             local key, mngr, transform = saml_ctx()
-            local signed = sign(key, transform, response(SUCCESS, "resp-1", ""))
-            local doc, err = submit(mngr, signed)
-            if err then ngx.say("err: ", err) else ngx.say("name_id: ", tostring(saml.doc_name_id(doc))) end
+            ngx.say(identity(mngr, sign(key, transform, response(SUCCESS, "resp-1", ""))))
         }
     }
 --- response_body
-err: response identity is not covered by the signature
+name_id: nil
 
 
 
-=== TEST 7: a nested non-success status in Extensions cannot relax the check
+=== TEST 7: a nested non-success status in Extensions cannot smuggle an identity
 --- config
     location /t {
         content_by_lua_block {
@@ -257,16 +250,15 @@ err: response identity is not covered by the signature
                 '<samlp:Status><samlp:StatusCode Value="' .. SUCCESS .. '"/></samlp:Status>' ..
                 assertion("a1", "admin@target.com") ..
                 '</samlp:Response>'
-            local doc, err = submit(mngr, outer)
-            if err then ngx.say("err: ", err) else ngx.say("name_id: ", saml.doc_name_id(doc)) end
+            ngx.say(identity(mngr, outer))
         }
     }
 --- response_body
-err: response identity is not covered by the signature
+name_id: nil
 
 
 
-=== TEST 8: an assertion under a nested Response cannot shadow the signed one
+=== TEST 8: a forged assertion under a nested Response cannot shadow the signed one
 --- config
     location /t {
         content_by_lua_block {
@@ -274,7 +266,7 @@ err: response identity is not covered by the signature
             -- the genuine, signed assertion sits directly in the outer response
             local signed = sign(key, transform, assertion("a1", "signed@example.com"))
             -- a forged assertion is a direct child of a nested Response hidden in
-            -- Extensions, and comes first in document order
+            -- Extensions, first in document order
             local nested = '<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ' ..
                 'xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="nested" Version="2.0" ' ..
                 'IssueInstant="2026-07-21T00:00:00Z"><saml:Issuer>https://idp.example.com</saml:Issuer>' ..
@@ -290,12 +282,11 @@ err: response identity is not covered by the signature
                 '<samlp:Status><samlp:StatusCode Value="' .. SUCCESS .. '"/></samlp:Status>' ..
                 signed ..
                 '</samlp:Response>'
-            local doc, err = submit(mngr, outer)
-            if err then ngx.say("err: ", err) else ngx.say("name_id: ", saml.doc_name_id(doc)) end
+            ngx.say(identity(mngr, outer))
         }
     }
 --- response_body
-err: response identity is not covered by the signature
+name_id: signed@example.com
 
 
 
@@ -322,32 +313,36 @@ name_id: signed@example.com, email: signed@example.com, role: admin
 
 
 
-=== TEST 10: an assertion-level signature cannot vouch for a second assertion
+=== TEST 10: an assertion-level signature cannot vouch for a second assertion's attributes
 --- config
     location /t {
         content_by_lua_block {
             local key, mngr, transform = saml_ctx()
             local signed = sign(key, transform, assertion("a1", "signed@example.com"))
             local forged = assertion("a2", "admin@target.com", attribute("role", "admin"))
-            local resp = response(SUCCESS, "resp-1", signed .. forged)
-            local doc, err = submit(mngr, resp)
-            if err then ngx.say("err: ", err) else ngx.say("name_id: ", saml.doc_name_id(doc)) end
+            local doc, err = submit(mngr, response(SUCCESS, "resp-1", signed .. forged))
+            if err then
+                ngx.say("err: ", err)
+            else
+                local attrs = saml.doc_attrs(doc)
+                ngx.say("name_id: ", tostring(saml.doc_name_id(doc)),
+                    ", role: ", tostring(attrs.role))
+            end
         }
     }
 --- response_body
-err: response identity is not covered by the signature
+name_id: signed@example.com, role: nil
 
 
 
-=== TEST 11: an assertion carrying Advice is trusted
+=== TEST 11: an assertion carrying Advice is trusted, its Advice is not read
 --- config
     location /t {
         content_by_lua_block {
             local key, mngr, transform = saml_ctx()
             local advice = "<saml:Advice>" .. assertion("adv", "advice@example.com") .. "</saml:Advice>"
             local signed = sign(key, transform, assertion("a1", "signed@example.com", advice))
-            local doc, err = submit(mngr, response(SUCCESS, "resp-1", signed))
-            if err then ngx.say("err: ", err) else ngx.say("name_id: ", saml.doc_name_id(doc)) end
+            ngx.say(identity(mngr, response(SUCCESS, "resp-1", signed)))
         }
     }
 --- response_body
@@ -355,7 +350,7 @@ name_id: signed@example.com
 
 
 
-=== TEST 12: a signed assertion in Extensions cannot cover the read assertion
+=== TEST 12: a signed assertion parked in Extensions cannot cover the read assertion
 --- config
     location /t {
         content_by_lua_block {
@@ -369,12 +364,11 @@ name_id: signed@example.com
                 '<samlp:Status><samlp:StatusCode Value="' .. SUCCESS .. '"/></samlp:Status>' ..
                 assertion("a1", "admin@target.com") ..
                 '</samlp:Response>'
-            local doc, err = submit(mngr, outer)
-            if err then ngx.say("err: ", err) else ngx.say("name_id: ", saml.doc_name_id(doc)) end
+            ngx.say(identity(mngr, outer))
         }
     }
 --- response_body
-err: response identity is not covered by the signature
+name_id: nil
 
 
 
@@ -398,3 +392,65 @@ err: response identity is not covered by the signature
     }
 --- response_body
 LogoutResponse: urn:oasis:names:tc:SAML:2.0:status:Success
+
+
+
+=== TEST 14: a non-Response root cannot smuggle identity from a nested Response
+--- config
+    location /t {
+        content_by_lua_block {
+            local key, mngr, transform = saml_ctx()
+            -- a genuinely signed assertion for a low-priv identity sits in a
+            -- nested Response beside a forged high-priv one, all wrapped in an
+            -- ArtifactResponse whose own status is Success
+            local stolen = sign(key, transform, assertion("stolen", "attacker@example.com"))
+            local forged = assertion("forged", "admin@target.com", attribute("role", "admin"))
+            local nested = '<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ' ..
+                'xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="nested" Version="2.0" ' ..
+                'IssueInstant="2026-07-21T00:00:00Z"><saml:Issuer>https://idp.example.com</saml:Issuer>' ..
+                '<samlp:Status><samlp:StatusCode Value="' .. SUCCESS .. '"/></samlp:Status>' ..
+                forged .. stolen .. '</samlp:Response>'
+            local art = '<samlp:ArtifactResponse xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ' ..
+                'xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="art" Version="2.0" ' ..
+                'IssueInstant="2026-07-21T00:00:00Z"><saml:Issuer>https://idp.example.com</saml:Issuer>' ..
+                '<samlp:Status><samlp:StatusCode Value="' .. SUCCESS .. '"/></samlp:Status>' ..
+                nested .. '</samlp:ArtifactResponse>'
+            local doc, err = submit(mngr, art)
+            if err then
+                ngx.say("err: ", err)
+            else
+                local attrs = saml.doc_attrs(doc)
+                ngx.say("root: ", saml.doc_root_name(doc),
+                    ", name_id: ", tostring(saml.doc_name_id(doc)),
+                    ", role: ", tostring(attrs and attrs.role))
+            end
+        }
+    }
+--- response_body
+root: ArtifactResponse, name_id: nil, role: nil
+
+
+
+=== TEST 15: a nested status earlier in the document is not the root status
+--- config
+    location /t {
+        content_by_lua_block {
+            local key, mngr, transform = saml_ctx()
+            -- a failure status sits in Extensions, ahead of the root's own
+            local ext = '<samlp:Extensions>' ..
+                assertion("ext", "irrelevant@example.com",
+                    "<saml:Advice>" .. response(FAILURE, "inner", "") .. "</saml:Advice>") ..
+                '</samlp:Extensions>'
+            local outer = '<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ' ..
+                'xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="outer" Version="2.0" ' ..
+                'IssueInstant="2026-07-21T00:00:00Z"><saml:Issuer>https://idp.example.com</saml:Issuer>' ..
+                ext ..
+                '<samlp:Status><samlp:StatusCode Value="' .. SUCCESS .. '"/></samlp:Status>' ..
+                assertion("a1", "signed@example.com") ..
+                '</samlp:Response>'
+            local doc, err = submit(mngr, sign(key, transform, outer))
+            if err then ngx.say("err: ", err) else ngx.say("status: ", saml.doc_status_code(doc)) end
+        }
+    }
+--- response_body
+status: urn:oasis:names:tc:SAML:2.0:status:Success

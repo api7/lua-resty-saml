@@ -130,6 +130,15 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
             return saml.binding_post_parse(saml.base64_encode(xml), function(_) return mngr end)
         end
 
+        -- Signature shapes sign_xml cannot build are pre-signed with the key
+        -- above and kept under t/fixtures.
+        function fixture(name)
+            local f = assert(io.open("$pwd/t/fixtures/" .. name, "r"))
+            local xml = f:read("*a")
+            f:close()
+            return xml
+        end
+
         -- The identity read back is only ever the genuinely signed subject or
         -- nil; a forged admin identity must never surface.
         function identity(mngr, xml)
@@ -454,3 +463,36 @@ root: ArtifactResponse, name_id: nil, role: nil
     }
 --- response_body
 status: urn:oasis:names:tc:SAML:2.0:status:Success
+
+
+
+=== TEST 16: one signature covering two assertions keeps both
+--- config
+    location /t {
+        content_by_lua_block {
+            local _, mngr = saml_ctx()
+            local doc, err = submit(mngr, fixture("multi-reference.xml"))
+            if err then
+                ngx.say("err: ", err)
+            else
+                local attrs = saml.doc_attrs(doc)
+                ngx.say("name_id: ", tostring(saml.doc_name_id(doc)),
+                    ", dept: ", tostring(attrs.dept), ", role: ", tostring(attrs.role))
+            end
+        }
+    }
+--- response_body
+name_id: first@example.com, dept: eng, role: ops
+
+
+
+=== TEST 17: an XPointer reference resolves like a barename one
+--- config
+    location /t {
+        content_by_lua_block {
+            local _, mngr = saml_ctx()
+            ngx.say(identity(mngr, fixture("xpointer-reference.xml")))
+        }
+    }
+--- response_body
+name_id: signed@example.com

@@ -12,6 +12,8 @@ jobs:
     runs-on: "ubuntu-latest"
     env:
       OPENRESTY_PREFIX: "/usr/local/openresty"
+      # the image ships OpenSSL 3, which is what its nginx links against
+      OPENSSL_DIR: "/usr/local/openresty/openssl3"
 
     steps:
       - uses: actions/checkout@v2
@@ -20,11 +22,15 @@ jobs:
         run: |
           sudo apt install -y cpanminus build-essential libncurses5-dev libreadline-dev libxml2-dev libxslt-dev perl
 
-          # openresty
-          wget -O - https://openresty.org/package/pubkey.gpg | sudo apt-key add -
-          echo "deb http://openresty.org/package/ubuntu $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/openresty.list
-          sudo apt-get update
-          sudo apt-get -y install openresty openresty-openssl111-dev
+          # openresty, taken from the official image rather than openresty.org's
+          # apt repo, which returns 500s for the -dev packages from CI runners.
+          # The image carries the same build plus the OpenSSL headers the module
+          # compiles against.
+          docker create --name openresty-dist openresty/openresty:noble
+          docker cp openresty-dist:/usr/local/openresty /tmp/openresty
+          docker rm openresty-dist
+          sudo mv /tmp/openresty "$OPENRESTY_PREFIX"
+          "$OPENRESTY_PREFIX/nginx/sbin/nginx" -v
 
           # Test::Nginx
           sudo cpanm --notest Test::Nginx > build.log 2>&1 || (cat build.log && exit 1)

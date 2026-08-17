@@ -303,6 +303,7 @@ saml_binding_status_t saml_binding_post_verify(xmlSecKeysMngr* mngr, xmlDoc* doc
   if (res < 0) {
     return SAML_XMLSEC_ERROR;
   } else if (res == 0) {
+    confine_identity_to_signature(doc);
     return SAML_OK;
   } else {
     return SAML_INVALID_SIGNATURE;

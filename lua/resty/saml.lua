@@ -300,6 +300,14 @@ local function login_callback(self, opts)
     local attrs = saml.doc_attrs(doc)
     local name_id = saml.doc_name_id(doc)
     local session_index = saml.doc_session_index(doc)
+
+    -- a success response the signature leaves without a readable assertion
+    -- carries no identity, so there is nobody to authenticate as
+    if not name_id then
+        ngx.log(ngx.ERR, "no name id in response from IdP")
+        ngx.exit(ngx.HTTP_UNAUTHORIZED)
+    end
+
     local session_expires = saml.doc_session_expires(doc)
     local expires
     if session_expires then

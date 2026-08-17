@@ -258,6 +258,22 @@ local function parse_iso8601_utc_time(str)
     return os.time{year=year, month=month, day=day, hour=hour, min=min, sec=sec}
 end
 
+-- A valid signature says the message came from the configured key. It does not
+-- say which IdP that key speaks for, so pin the issuer when the caller names
+-- the ones it expects. No list keeps the previous behaviour; a list nothing
+-- matches, an empty one included, admits nobody.
+local function issuer_allowed(allowed, issuer)
+    if allowed == nil then
+        return true
+    end
+    for _, expected in ipairs(allowed) do
+        if expected == issuer then
+            return true
+        end
+    end
+    return false
+end
+
 local function login_callback(self, opts)
     local sess = session.start(self.session_config)
 
@@ -300,6 +316,11 @@ local function login_callback(self, opts)
     local attrs = saml.doc_attrs(doc)
     local name_id = saml.doc_name_id(doc)
     local session_index = saml.doc_session_index(doc)
+
+    if not issuer_allowed(opts.idp_issuers, issuer) then
+        ngx.log(ngx.ERR, "unexpected issuer in response from IdP: ", tostring(issuer))
+        ngx.exit(ngx.HTTP_UNAUTHORIZED)
+    end
 
     -- a success response the signature leaves without a readable assertion
     -- carries no identity, so there is nobody to authenticate as

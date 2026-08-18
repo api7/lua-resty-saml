@@ -225,6 +225,20 @@ local function login(self, opts)
     return ngx.redirect(opts.idp_uri .. "?" .. query_str)
 end
 
+-- Days since 1970-01-01 for a civil date. os.time reads its table as local
+-- time, which would shift every SAML timestamp by the machine's offset.
+local function days_from_civil(year, month, day)
+    if month <= 2 then
+        year = year - 1
+    end
+    local era = math.floor(year / 400)
+    local year_of_era = year - era * 400
+    local day_of_year = math.floor((153 * ((month + 9) % 12) + 2) / 5) + day - 1
+    local day_of_era = year_of_era * 365 + math.floor(year_of_era / 4)
+        - math.floor(year_of_era / 100) + day_of_year
+    return era * 146097 + day_of_era - 719468
+end
+
 local function parse_iso8601_utc_time(str)
     -- NOTE: We accept only 'Z' for timezone.
     local year_s, month_s, day_s, hour_s, min_s, sec_s = str:match('(%d%d%d%d)-(%d%d)-(%d%d)T(%d%d):(%d%d):(%d%d).*Z')
@@ -255,7 +269,112 @@ local function parse_iso8601_utc_time(str)
     if sec < 0 or 59 < sec then
         return nil, 'invalid sec in UTC time'
     end
-    return os.time{year=year, month=month, day=day, hour=hour, min=min, sec=sec}
+    return days_from_civil(year, month, day) * 86400 + hour * 3600 + min * 60 + sec
+end
+
+
+-- A signature says the message came from the IdP. It does not say the assertion
+-- is still good, that it was issued for this SP, or that it may be presented
+-- here. Those live in the assertion's own Conditions and SubjectConfirmation,
+-- and are checked below.
+--
+-- A constraint the IdP left out is not invented: an IdP that sends no
+-- AudienceRestriction keeps working. One the IdP did send is enforced, which is
+-- what stops an assertion minted for another SP in the same federation.
+local DEFAULT_CLOCK_SKEW = 60
+
+local function time_bounds_ok(not_before, not_on_or_after, now, skew)
+    if not_before then
+        local at, err = parse_iso8601_utc_time(not_before)
+        if not at then
+            return false, "carries an unreadable NotBefore " .. not_before .. ": " .. err
+        end
+        if now + skew < at then
+            return false, "is not valid before " .. not_before
+        end
+    end
+
+    if not_on_or_after then
+        local at, err = parse_iso8601_utc_time(not_on_or_after)
+        if not at then
+            return false, "carries an unreadable NotOnOrAfter " .. not_on_or_after .. ": " .. err
+        end
+        if now - skew >= at then
+            return false, "is not valid on or after " .. not_on_or_after
+        end
+    end
+
+    return true
+end
+
+
+local function audience_accepted(accepted, audiences)
+    for _, audience in ipairs(audiences) do
+        for _, expected in ipairs(accepted) do
+            if expected == audience then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+
+-- The assertion may be presented to whoever the Recipient names, for as long as
+-- the confirmation data allows. Several confirmations can be offered and any one
+-- of them being satisfiable is enough.
+local function confirmation_ok(confirmation, acs_url, now, skew)
+    if confirmation.recipient and confirmation.recipient ~= acs_url then
+        return false
+    end
+    return (time_bounds_ok(confirmation.not_before, confirmation.not_on_or_after, now, skew))
+end
+
+
+-- Every top-level assertion the verified signature left in the document is one
+-- the readers draw identity from, so every one of them has to hold up.
+local function assertions_acceptable(opts, assertions, acs_url, now)
+    local skew = opts.clock_skew or DEFAULT_CLOCK_SKEW
+    local accepted = opts.sp_audiences or { opts.sp_issuer }
+
+    for _, assertion in ipairs(assertions) do
+        local where = "assertion " .. tostring(assertion.id) .. " "
+
+        -- SAML Core 2.5.1: a condition the SP does not understand leaves the
+        -- assertion Indeterminate, which is not a licence to use it
+        if assertion.unknown_condition then
+            return false, where .. "carries an unrecognised condition " .. assertion.unknown_condition
+        end
+
+        local ok, err = time_bounds_ok(assertion.not_before, assertion.not_on_or_after, now, skew)
+        if not ok then
+            return false, where .. err
+        end
+
+        -- each AudienceRestriction narrows the audience separately, so this SP
+        -- has to be named in all of them
+        for _, restriction in ipairs(assertion.audience_restrictions) do
+            if not audience_accepted(accepted, restriction) then
+                return false, where .. "is restricted to " .. table.concat(restriction, ", ")
+            end
+        end
+
+        local confirmations = assertion.subject_confirmations
+        if #confirmations > 0 then
+            local satisfiable = false
+            for _, confirmation in ipairs(confirmations) do
+                if confirmation_ok(confirmation, acs_url, now, skew) then
+                    satisfiable = true
+                    break
+                end
+            end
+            if not satisfiable then
+                return false, where .. "offers no subject confirmation this SP can satisfy"
+            end
+        end
+    end
+
+    return true
 end
 
 local function login_callback(self, opts)
@@ -293,6 +412,26 @@ local function login_callback(self, opts)
     local state = args.RelayState
     if state ~= saml_state then
         ngx.log(ngx.ERR, "state different: args.state=", state, ", state=", saml_state)
+        ngx.exit(ngx.HTTP_UNAUTHORIZED)
+    end
+
+    local acs_url = saml_get_redirect_uri(opts.login_callback_uri)
+
+    local destination = saml.doc_destination(doc)
+    if destination and destination ~= acs_url then
+        ngx.log(ngx.ERR, "response from IdP is addressed to ", destination)
+        ngx.exit(ngx.HTTP_UNAUTHORIZED)
+    end
+
+    local assertions = saml.doc_assertions(doc)
+    if not assertions then
+        ngx.log(ngx.ERR, "could not read the assertions in response from IdP")
+        ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
+    end
+
+    local acceptable, reason = assertions_acceptable(opts, assertions, acs_url, ngx.time())
+    if not acceptable then
+        ngx.log(ngx.ERR, "response from IdP rejected: ", reason)
         ngx.exit(ngx.HTTP_UNAUTHORIZED)
     end
 

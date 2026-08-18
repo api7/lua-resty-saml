@@ -42,6 +42,31 @@ typedef struct {
   int num_values;
 } saml_attr_t;
 
+typedef struct {
+  xmlChar** audiences;
+  size_t audiences_len;
+} saml_audience_restriction_t;
+
+typedef struct {
+  xmlChar* method;
+  xmlChar* recipient;
+  xmlChar* not_before;
+  xmlChar* not_on_or_after;
+  xmlChar* in_response_to;
+} saml_subject_confirmation_t;
+
+typedef struct {
+  xmlChar* id;
+  int has_conditions;
+  xmlChar* not_before;
+  xmlChar* not_on_or_after;
+  xmlChar* unknown_condition;
+  saml_audience_restriction_t* audience_restrictions;
+  size_t audience_restrictions_len;
+  saml_subject_confirmation_t* confirmations;
+  size_t confirmations_len;
+} saml_assertion_t;
+
 typedef enum {
   SAML_ZLIB_ERROR = -2,
   SAML_XMLSEC_ERROR,
@@ -84,6 +109,8 @@ xmlChar* saml_doc_session_index(xmlDoc* doc);
 xmlChar* saml_doc_session_expires(xmlDoc* doc);
 int saml_doc_attrs(xmlDoc* doc, saml_attr_t** attrs, size_t* attrs_len);
 void saml_attrs_free(saml_attr_t* attrs, size_t attrs_len);
+int saml_doc_assertions(xmlDoc* doc, saml_assertion_t** assertions, size_t* assertions_len);
+void saml_assertions_free(saml_assertion_t* assertions, size_t assertions_len);
 
 xmlSecTransformCtx* saml_sign_binary(xmlSecKey* key, xmlSecTransformId transform_id, unsigned char* data, size_t data_len);
 int saml_verify_binary(xmlSecKey* cert, xmlSecTransformId transform_id, unsigned char* data, size_t data_len, unsigned char* sig, size_t sig_len);

@@ -156,9 +156,10 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
             spec = spec or {}
             local data = ""
             if spec.data ~= false then
-                data = string.format('<saml:SubjectConfirmationData%s%s%s/>',
+                data = string.format('<saml:SubjectConfirmationData%s%s%s%s/>',
                     attr("Recipient", spec.recipient), attr("NotBefore", spec.not_before),
-                    attr("NotOnOrAfter", spec.not_on_or_after))
+                    attr("NotOnOrAfter", spec.not_on_or_after),
+                    attr("InResponseTo", spec.in_response_to))
             end
             return string.format('<saml:SubjectConfirmation Method="%s">%s</saml:SubjectConfirmation>',
                 spec.method or BEARER, data)
@@ -175,17 +176,31 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
                 spec.confirmations or "", spec.conditions or "")
         end
 
-        function response(body, destination)
+        function response(body, destination, in_response_to)
             return string.format('<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ' ..
-                'xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="resp-1" Version="2.0"%s ' ..
+                'xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="resp-1" Version="2.0"%s%s ' ..
                 'IssueInstant="2026-07-21T00:00:00Z"><saml:Issuer>%s</saml:Issuer>' ..
                 '<samlp:Status><samlp:StatusCode Value="%s"/></samlp:Status>%s</samlp:Response>',
-                attr("Destination", destination), IDP, SUCCESS, body)
+                attr("Destination", destination), attr("InResponseTo", in_response_to),
+                IDP, SUCCESS, body)
         end
 
         -- only the assertion is signed, the shape an IdP sends by default
-        function saml_response(spec, destination)
-            return response(sign_doc(assertion(spec)), destination)
+        function saml_response(spec, destination, in_response_to)
+            return response(sign_doc(assertion(spec)), destination, in_response_to)
+        end
+
+        -- the ID of the AuthnRequest the SP just issued, read back out of the
+        -- redirect it sent the browser
+        function authn_request_id(location)
+            local args = {}
+            for k, v in location:gmatch("([^?&=]+)=([^&]*)") do
+                args[k] = ngx.unescape_uri(v)
+            end
+            local cert = assert(saml.key_read_memory(CERT_PEM, saml.KeyDataFormatCertPem))
+            local doc = assert(saml.binding_redirect_parse("SAMLRequest", args,
+                function(_) return cert end))
+            return saml.doc_id(doc)
         end
 
         -- start a login, then hand the crafted response back to the callback
@@ -200,6 +215,12 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
             local cookie = res.headers["Set-Cookie"]
             if type(cookie) == "table" then cookie = cookie[1] end
             local state = res.headers["Location"]:match("RelayState=([^&]+)")
+
+            -- a response that has to name the request gets built once the SP
+            -- has issued one
+            if type(xml) == "function" then
+                xml = xml(authn_request_id(res.headers["Location"]))
+            end
 
             res, err = httpc:request_uri(base .. "/acs", {
                 method = "POST",
@@ -532,5 +553,53 @@ destination: nil
 --- main_config
 env SAML_DATA_DIR=./;
 env TZ=XXX-14;
+--- response_body
+302 /
+
+
+
+=== TEST 18: a response answering another request is refused
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.say(login_with("plain", saml_response({}, nil, "ID_some-other-request")))
+        }
+    }
+--- response_body
+401 nil
+--- error_log
+response from IdP answers request ID_some-other-request
+
+
+
+=== TEST 19: a confirmation answering another request is refused
+--- config
+    location /t {
+        content_by_lua_block {
+            -- inside the signature, so this is the binding an attacker replaying
+            -- a captured assertion cannot rewrite
+            ngx.say(login_with("plain", saml_response({
+                confirmations = confirmation({ recipient = ACS, in_response_to = "ID_some-other-request" }),
+            })))
+        }
+    }
+--- response_body
+401 nil
+--- error_log
+offers no subject confirmation this SP can satisfy
+
+
+
+=== TEST 20: a response answering this SP's own request is accepted
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.say(login_with("plain", function(request_id)
+                return saml_response({
+                    confirmations = confirmation({ recipient = ACS, in_response_to = request_id }),
+                }, ACS, request_id)
+            end))
+        }
+    }
 --- response_body
 302 /

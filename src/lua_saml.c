@@ -520,6 +520,34 @@ static int doc_attrs(lua_State* L) {
 
 
 /***
+Get the InResponseTo attribute of the root message
+@function doc_in_response_to
+@tparam xmlDoc* doc
+@treturn ?string in_response_to
+*/
+static int doc_in_response_to(lua_State* L) {
+  lua_settop(L, 1);
+  xmlDoc* doc = doc_check(L, 1);
+  lua_pop(L, 1);
+
+  xmlNode* root = xmlDocGetRootElement(doc);
+  if (root == NULL) {
+    lua_pushnil(L);
+    return 1;
+  }
+
+  xmlChar* in_response_to = xmlGetNoNsProp(root, (const xmlChar*)"InResponseTo");
+  if (in_response_to == NULL) {
+    lua_pushnil(L);
+  } else {
+    lua_pushstring(L, (char*)in_response_to);
+    xmlFree(in_response_to);
+  }
+  return 1;
+}
+
+
+/***
 Get the Destination attribute of the root message
 @function doc_destination
 @tparam xmlDoc* doc
@@ -1291,6 +1319,7 @@ static const struct luaL_Reg saml_funcs[] = {
   {"doc_attrs", doc_attrs},
   {"doc_assertions", doc_assertions},
   {"doc_destination", doc_destination},
+  {"doc_in_response_to", doc_in_response_to},
 
   {"key_read_memory", key_read_memory},
   {"key_read_file", key_read_file},

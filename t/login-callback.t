@@ -92,6 +92,7 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
             none = nil,
             exact = { IDP },
             other = { "https://other.example.com" },
+            both = { IDP, "https://other.example.com" },
         }
         SPS = {}
 
@@ -114,29 +115,36 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
             return SPS[name]
         end
 
-        -- an assertion signed by the IdP key, so the wrapping Response below is
-        -- outside the signature exactly as it is in the wild
-        function signed_assertion(issuer, name_id)
+        function sign_doc(xml)
             local key = assert(saml.key_read_memory(KEY_PEM, saml.KeyDataFormatPem))
             saml.key_add_cert_memory(key, CERT_PEM, saml.KeyDataFormatCertPem)
             local transform = saml.find_transform_by_href(
                 "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256")
-            local xml = string.format('<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ' ..
-                'ID="a1" Version="2.0" IssueInstant="2026-07-21T00:00:00Z">' ..
-                '<saml:Issuer>%s</saml:Issuer>' ..
-                '<saml:Subject><saml:NameID>%s</saml:NameID></saml:Subject></saml:Assertion>',
-                issuer, name_id)
             local out = assert(saml.sign_xml(key, transform, xml,
                 { id_attr = "ID", insert_after = { saml.XMLNS_ASSERTION, "Issuer" } }))
             return (out:gsub("<%?xml.-%?>%s*", ""))
         end
 
-        function saml_response(response_issuer, assertion_issuer, name_id)
+        function assertion(issuer, id, name_id)
+            return string.format('<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ' ..
+                'ID="%s" Version="2.0" IssueInstant="2026-07-21T00:00:00Z">' ..
+                '<saml:Issuer>%s</saml:Issuer>' ..
+                '<saml:Subject><saml:NameID>%s</saml:NameID></saml:Subject></saml:Assertion>',
+                id, issuer, name_id)
+        end
+
+        function response(issuer, body)
             return string.format('<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ' ..
                 'xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="resp-1" Version="2.0" ' ..
                 'IssueInstant="2026-07-21T00:00:00Z"><saml:Issuer>%s</saml:Issuer>' ..
                 '<samlp:Status><samlp:StatusCode Value="%s"/></samlp:Status>%s</samlp:Response>',
-                response_issuer, SUCCESS, signed_assertion(assertion_issuer, name_id))
+                issuer, SUCCESS, body)
+        end
+
+        -- only the assertion is signed, so the Response around it, its own
+        -- Issuer included, is whatever the sender wants
+        function saml_response(response_issuer, assertion_issuer, name_id)
+            return response(response_issuer, sign_doc(assertion(assertion_issuer, "a1", name_id)))
         end
 
         -- start a login, then hand the crafted response back to the callback
@@ -242,3 +250,37 @@ unexpected issuer in response from IdP: https://elsewhere.example.com
 401 nil
 --- error_log
 unexpected issuer in response from IdP: https://other.example.com
+
+
+
+=== TEST 5: a second assertion the allow-list does not name is rejected
+--- config
+    location /t {
+        content_by_lua_block {
+            -- the whole response is signed, so both assertions are covered and
+            -- both are read from, but only the first names an expected issuer
+            local xml = sign_doc(response(IDP,
+                assertion(IDP, "a1", "signed@example.com") ..
+                assertion("https://other.example.com", "a2", "other@example.com")))
+            ngx.say(login_with("exact", xml))
+        }
+    }
+--- response_body
+401 nil
+--- error_log
+unexpected issuer in response from IdP: https://other.example.com
+
+
+
+=== TEST 6: two assertions are accepted when the allow-list names both
+--- config
+    location /t {
+        content_by_lua_block {
+            local xml = sign_doc(response(IDP,
+                assertion(IDP, "a1", "signed@example.com") ..
+                assertion("https://other.example.com", "a2", "other@example.com")))
+            ngx.say(login_with("both", xml))
+        }
+    }
+--- response_body
+302 /

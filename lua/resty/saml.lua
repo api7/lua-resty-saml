@@ -262,16 +262,27 @@ end
 -- say which IdP that key speaks for, so pin the issuer when the caller names
 -- the ones it expects. No list keeps the previous behaviour; a list nothing
 -- matches, an empty one included, admits nobody.
-local function issuer_allowed(allowed, issuer)
+--
+-- Every assertion is weighed, not just the one the issuer is taken from: a
+-- response may legitimately carry several, and attributes are read from all of
+-- them. Returns the offending issuer alongside a refusal.
+local function issuers_allowed(allowed, issuers)
     if allowed == nil then
         return true
     end
-    for _, expected in ipairs(allowed) do
-        if expected == issuer then
-            return true
+    for _, issuer in ipairs(issuers or {}) do
+        local ok = false
+        for _, expected in ipairs(allowed) do
+            if expected == issuer then
+                ok = true
+                break
+            end
+        end
+        if not ok then
+            return false, issuer
         end
     end
-    return false
+    return true
 end
 
 local function login_callback(self, opts)
@@ -317,8 +328,9 @@ local function login_callback(self, opts)
     local name_id = saml.doc_name_id(doc)
     local session_index = saml.doc_session_index(doc)
 
-    if not issuer_allowed(opts.idp_issuers, issuer) then
-        ngx.log(ngx.ERR, "unexpected issuer in response from IdP: ", tostring(issuer))
+    local allowed, unexpected = issuers_allowed(opts.idp_issuers, saml.doc_issuers(doc))
+    if not allowed then
+        ngx.log(ngx.ERR, "unexpected issuer in response from IdP: ", tostring(unexpected))
         ngx.exit(ngx.HTTP_UNAUTHORIZED)
     end
 

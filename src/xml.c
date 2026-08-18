@@ -73,6 +73,72 @@ xmlChar* saml_doc_issuer(xmlDoc* doc) {
 }
 
 
+// Every issuer the message attributes content to: one per top-level assertion
+// of a Response, or its own for a message that carries none. A caller matching
+// the issuer against a policy has to weigh all of them, because doc_attrs reads
+// every top-level assertion and doc_name_id the first one carrying a subject.
+// An assertion with no Issuer is invalid SAML; it is listed as an empty string,
+// which no configured issuer matches.
+int saml_doc_issuers(xmlDoc* doc, xmlChar*** issuers, size_t* issuers_len) {
+  *issuers = NULL;
+  *issuers_len = 0;
+
+  xmlNode* root = xmlDocGetRootElement(doc);
+  if (root == NULL) {
+    return 0;
+  }
+
+  if (xmlStrEqual(root->name, (const xmlChar*)"Response") != 1) {
+    xmlChar* issuer = issuer_of(doc, root);
+    if (issuer == NULL) {
+      return 0;
+    }
+    *issuers = malloc(sizeof(xmlChar*));
+    if (*issuers == NULL) {
+      xmlFree(issuer);
+      return -1;
+    }
+    (*issuers)[0] = issuer;
+    *issuers_len = 1;
+    return 0;
+  }
+
+  size_t count = 0;
+  for (xmlNode* child = root->children; child != NULL; child = child->next) {
+    if (is_saml_assertion(child)) {
+      count++;
+    }
+  }
+  if (count == 0) {
+    return 0;
+  }
+
+  *issuers = malloc(count * sizeof(xmlChar*));
+  if (*issuers == NULL) {
+    return -1;
+  }
+
+  size_t i = 0;
+  for (xmlNode* child = root->children; child != NULL && i < count; child = child->next) {
+    if (!is_saml_assertion(child)) {
+      continue;
+    }
+    xmlChar* issuer = issuer_of(doc, child);
+    (*issuers)[i++] = issuer == NULL ? xmlStrdup((const xmlChar*)"") : issuer;
+  }
+  *issuers_len = i;
+  return 0;
+}
+
+
+void saml_issuers_free(xmlChar** issuers, size_t issuers_len) {
+  for (size_t i = 0; i < issuers_len; i++) {
+    xmlFree(issuers[i]);
+  }
+  free(issuers);
+}
+
+
 xmlChar* saml_doc_name_id(xmlDoc* doc) {
   xmlNode* node = xmlDocGetRootElement(doc);
   if (node == NULL) {

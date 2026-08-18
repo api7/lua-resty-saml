@@ -557,3 +557,24 @@ issuer: https://idp.example.com
     }
 --- response_body
 LogoutResponse issuer: https://idp.example.com
+
+
+
+=== TEST 21: every assertion the readers consume reports its issuer
+--- config
+    location /t {
+        content_by_lua_block {
+            local key, mngr, transform = saml_ctx()
+            local a1 = assertion("a1", "first@example.com")
+            local a2 = (assertion("a2", "second@example.com")
+                :gsub("https://idp.example.com", "https://other.example.com"))
+            local doc, err = submit(mngr, sign(key, transform, response(SUCCESS, "resp-1", a1 .. a2)))
+            if err then
+                ngx.say("err: ", err)
+            else
+                ngx.say(table.concat(saml.doc_issuers(doc), ", "))
+            end
+        }
+    }
+--- response_body
+https://idp.example.com, https://other.example.com

@@ -284,3 +284,17 @@ unexpected issuer in response from IdP: https://other.example.com
     }
 --- response_body
 302 /
+
+
+
+=== TEST 7: a response with no readable issuer is rejected
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.say(login_with("exact", sign_doc(response(IDP, ""))))
+        }
+    }
+--- response_body
+401 nil
+--- error_log
+unexpected issuer in response from IdP: none readable

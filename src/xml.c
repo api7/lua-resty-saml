@@ -73,6 +73,14 @@ xmlChar* saml_doc_issuer(xmlDoc* doc) {
 }
 
 
+void saml_issuers_free(xmlChar** issuers, size_t issuers_len) {
+  for (size_t i = 0; i < issuers_len; i++) {
+    xmlFree(issuers[i]);
+  }
+  free(issuers);
+}
+
+
 // Every issuer the message attributes content to: one per top-level assertion
 // of a Response, or its own for a message that carries none. A caller matching
 // the issuer against a policy has to weigh all of them, because doc_attrs reads
@@ -124,18 +132,20 @@ int saml_doc_issuers(xmlDoc* doc, xmlChar*** issuers, size_t* issuers_len) {
       continue;
     }
     xmlChar* issuer = issuer_of(doc, child);
-    (*issuers)[i++] = issuer == NULL ? xmlStrdup((const xmlChar*)"") : issuer;
+    if (issuer == NULL) {
+      issuer = xmlStrdup((const xmlChar*)"");
+    }
+    if (issuer == NULL) {
+      // a short list would read as fewer assertions to vouch for than the
+      // document holds, so report the failure rather than an incomplete answer
+      saml_issuers_free(*issuers, i);
+      *issuers = NULL;
+      return -1;
+    }
+    (*issuers)[i++] = issuer;
   }
   *issuers_len = i;
   return 0;
-}
-
-
-void saml_issuers_free(xmlChar** issuers, size_t issuers_len) {
-  for (size_t i = 0; i < issuers_len; i++) {
-    xmlFree(issuers[i]);
-  }
-  free(issuers);
 }
 
 

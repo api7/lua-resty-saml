@@ -428,7 +428,7 @@ static int doc_issuers(lua_State* L) {
   lua_newtable(L);
   for (size_t i = 0; i < issuers_len; i++) {
     lua_pushinteger(L, i + 1);
-    lua_pushstring(L, (char*)issuers[i]);
+    lua_pushstring(L, issuers[i] == NULL ? "" : (char*)issuers[i]);
     lua_settable(L, -3);
   }
   saml_issuers_free(issuers, issuers_len);

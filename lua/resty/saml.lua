@@ -265,12 +265,16 @@ end
 --
 -- Every assertion is weighed, not just the one the issuer is taken from: a
 -- response may legitimately carry several, and attributes are read from all of
--- them. Returns the offending issuer alongside a refusal.
+-- them. A response whose issuers cannot be read vouches for nobody. Returns
+-- what to name in the log alongside a refusal.
 local function issuers_allowed(allowed, issuers)
     if allowed == nil then
         return true
     end
-    for _, issuer in ipairs(issuers or {}) do
+    if type(issuers) ~= "table" or #issuers == 0 then
+        return false, "none readable"
+    end
+    for _, issuer in ipairs(issuers) do
         local ok = false
         for _, expected in ipairs(allowed) do
             if expected == issuer then

@@ -287,6 +287,9 @@ end
 -- what stops an assertion minted for another SP in the same federation.
 local DEFAULT_CLOCK_SKEW = 60
 
+-- how long an assertion that sets no expiry of its own is remembered
+local DEFAULT_REPLAY_TTL = 600
+
 local function time_bounds_ok(not_before, not_on_or_after, now, skew)
     if not_before then
         local at, err = parse_iso8601_utc_time(not_before)
@@ -384,6 +387,52 @@ local function assertions_acceptable(opts, assertions, expected, now)
     return true
 end
 
+-- A bearer assertion is good for one login. Nothing above stops the same one
+-- being presented again inside its validity window, so its ID is kept until it
+-- expires and a second presentation is refused.
+--
+-- The window from the assertion's own Conditions decides how long the entry
+-- lives, so the cache holds exactly what is still usable. An assertion that
+-- names no expiry is replayable for as long as it is remembered, which is what
+-- replay_ttl bounds.
+local function assertions_unused(dict, opts, assertions, now)
+    local skew = opts.clock_skew or DEFAULT_CLOCK_SKEW
+
+    for _, assertion in ipairs(assertions) do
+        if not assertion.id then
+            return false, "an assertion without an ID cannot be tracked"
+        end
+
+        local ttl = opts.replay_ttl or DEFAULT_REPLAY_TTL
+        if assertion.not_on_or_after then
+            local expires = parse_iso8601_utc_time(assertion.not_on_or_after)
+            if expires then
+                ttl = expires + skew - now
+            end
+        end
+        if ttl < 1 then
+            ttl = 1
+        end
+
+        -- an SP name in the key so instances sharing one dict stay apart
+        local key = tostring(opts.sp_issuer) .. "|" .. assertion.id
+        local added, err, forcible = dict:add(key, true, ttl)
+        if not added then
+            if err == "exists" then
+                return false, "assertion " .. assertion.id .. " has been presented already"
+            end
+            return false, "could not track assertion " .. assertion.id .. ": " .. tostring(err)
+        end
+        if forcible then
+            ngx.log(ngx.WARN, "the assertion replay dict is full, older assertions are ",
+                "no longer tracked")
+        end
+    end
+
+    return true
+end
+
+
 local function login_callback(self, opts)
     local sess = session.start(self.session_config)
 
@@ -447,10 +496,19 @@ local function login_callback(self, opts)
         ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
     end
 
-    local acceptable, reason = assertions_acceptable(opts, assertions, expected, ngx.time())
+    local now = ngx.time()
+    local acceptable, reason = assertions_acceptable(opts, assertions, expected, now)
     if not acceptable then
         ngx.log(ngx.ERR, "response from IdP rejected: ", reason)
         ngx.exit(ngx.HTTP_UNAUTHORIZED)
+    end
+
+    if self.replay_dict then
+        local unused, used_reason = assertions_unused(self.replay_dict, opts, assertions, now)
+        if not unused then
+            ngx.log(ngx.ERR, "response from IdP rejected: ", used_reason)
+            ngx.exit(ngx.HTTP_UNAUTHORIZED)
+        end
     end
 
     local issuer = saml.doc_issuer(doc)
@@ -652,6 +710,10 @@ function _M.new(opts)
     obj.key_mngr_from_doc = function(doc) return obj.idp_cert_manager end
     obj.idp_cert_func = function(doc) return idp_cert end
     obj.auth_protocol_binding_method = opts.auth_protocol_binding_method
+    if opts.replay_dict then
+        obj.replay_dict = assert(ngx.shared[opts.replay_dict],
+            "no lua_shared_dict named " .. opts.replay_dict)
+    end
     local cookie_secure, cookie_same_site
     if opts.auth_protocol_binding_method == "HTTP-POST" then
         cookie_secure = true

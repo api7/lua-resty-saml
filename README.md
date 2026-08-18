@@ -81,6 +81,8 @@ local saml = resty_saml.new(opts)
 | `sp_private_key`      | string       | None      | SP private key.       |
 | `sp_audiences`      | array of strings       | `{ sp_issuer }`      | Audiences this SP answers to. An assertion carrying an `AudienceRestriction` has to name one of them; an assertion carrying none is unrestricted.       |
 | `clock_skew`      | number       | `60`      | Seconds of clock difference tolerated against the IdP when weighing `NotBefore` and `NotOnOrAfter`.       |
+| `replay_dict`      | string       | None      | Name of an `lua_shared_dict` in which to remember the assertions already presented, so none is accepted twice. Unset leaves them untracked.       |
+| `replay_ttl`      | number       | `600`      | Seconds to remember an assertion that names no `NotOnOrAfter` of its own. One that names it is remembered until it expires.       |
 
 #### saml:authenticate()
 

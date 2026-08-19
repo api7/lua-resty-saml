@@ -457,13 +457,19 @@ offers no subject confirmation this SP can satisfy
 302 /
 
 
-=== TEST 13: an unrecognised condition leaves the assertion indeterminate
+=== TEST 13: a condition this SP cannot satisfy leaves the assertion indeterminate
 --- config
     location /t {
         content_by_lua_block {
+            -- ProxyRestriction binds the IdP, not this SP, so it is satisfied
             ngx.say(login_with("plain", saml_response({
-                conditions = conditions({ body = "<saml:OneTimeUse/><saml:ProxyRestriction Count=\"1\"/>" }),
+                conditions = conditions({ body = "<saml:ProxyRestriction Count=\"1\"/>" }),
             })))
+            -- OneTimeUse asks this SP to remember which assertions it has spent
+            ngx.say(login_with("plain", saml_response({
+                conditions = conditions({ body = "<saml:OneTimeUse/>" }),
+            })))
+            -- and a condition it has never heard of asks who knows what
             ngx.say(login_with("plain", saml_response({
                 conditions = conditions({
                     body = '<saml:Condition xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ' ..
@@ -475,8 +481,10 @@ offers no subject confirmation this SP can satisfy
 --- response_body
 302 /
 401 nil
---- error_log
-carries an unrecognised condition Condition
+401 nil
+--- error_log eval
+[qr/carries a condition this SP cannot satisfy: OneTimeUse/,
+qr/carries a condition this SP cannot satisfy: Condition/]
 
 
 === TEST 14: a response addressed to another endpoint is refused

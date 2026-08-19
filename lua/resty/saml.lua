@@ -359,10 +359,11 @@ local function assertions_acceptable(opts, assertions, expected, now)
     for _, assertion in ipairs(assertions) do
         local where = "assertion " .. tostring(assertion.id) .. " "
 
-        -- SAML Core 2.5.1: a condition the SP does not understand leaves the
+        -- SAML Core 2.5.1: a condition the SP cannot satisfy leaves the
         -- assertion Indeterminate, which is not a licence to use it
         if assertion.unknown_condition then
-            return false, where .. "carries an unrecognised condition " .. assertion.unknown_condition
+            return false, where .. "carries a condition this SP cannot satisfy: " ..
+                assertion.unknown_condition
         end
 
         local ok, err = time_bounds_ok(assertion.not_before, assertion.not_on_or_after, now, skew)

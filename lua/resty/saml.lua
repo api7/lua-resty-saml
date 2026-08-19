@@ -126,6 +126,15 @@ local function saml_get_redirect_uri(path)
     return scheme .. "://" .. host .. path
 end
 
+-- The endpoint the IdP delivers the response to. A configured value wins over
+-- the one assembled from request headers, which the requester can steer, and it
+-- is what an SP behind a proxy that rewrites neither scheme nor host needs.
+-- The same value is announced to the IdP and enforced on the way back, so the
+-- two cannot drift.
+local function sp_acs_url(opts)
+    return opts.sp_acs_url or saml_get_redirect_uri(opts.login_callback_uri)
+end
+
 local function interp(s, tab)
     return s:gsub('($%b{})', function(w)
         local key = w:sub(3, -2)
@@ -151,7 +160,7 @@ local AUTHN_REQUEST = [[
 
 local function authn_request(opts, request_id)
     return interp(AUTHN_REQUEST, {
-        acs_url = saml_get_redirect_uri(opts.login_callback_uri),
+        acs_url = sp_acs_url(opts),
         destination = opts.idp_uri,
         issue_instant = os.date("!%Y-%m-%dT%TZ"),
         issuer = opts.sp_issuer,
@@ -423,7 +432,7 @@ local function login_callback(self, opts)
     end
 
     local expected = {
-        acs_url = saml_get_redirect_uri(opts.login_callback_uri),
+        acs_url = sp_acs_url(opts),
         request_id = sess:get("saml_request_id"),
     }
 

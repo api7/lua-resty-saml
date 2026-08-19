@@ -94,6 +94,7 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
             plain = {},
             skew = { clock_skew = 300 },
             audiences = { sp_audiences = { "https://sp.example.com/metadata" } },
+            acs = { sp_acs_url = "http://127.0.0.1:1984/acs" },
         }
         SPS = {}
 
@@ -188,9 +189,19 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
             return response(sign_doc(assertion(spec)), destination)
         end
 
+        function callback_headers(name, cookie, extra)
+            local headers = {
+                ["X-Test-SP"] = name,
+                ["Cookie"] = cookie:match("^[^;]+"),
+                ["Content-Type"] = "application/x-www-form-urlencoded",
+            }
+            for k, v in pairs(extra or {}) do headers[k] = v end
+            return headers
+        end
+
         -- start a login, then hand the crafted response back to the callback
         -- with the session and RelayState that login handed out
-        function login_with(name, xml)
+        function login_with(name, xml, extra)
             local httpc = require("resty.http").new()
             local base = "http://127.0.0.1:1984"
             local headers = { ["X-Test-SP"] = name }
@@ -205,11 +216,7 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
                 method = "POST",
                 body = "SAMLResponse=" .. ngx.escape_uri(saml.base64_encode(xml)) ..
                     "&RelayState=" .. state,
-                headers = {
-                    ["X-Test-SP"] = name,
-                    ["Cookie"] = cookie:match("^[^;]+"),
-                    ["Content-Type"] = "application/x-www-form-urlencoded",
-                },
+                headers = callback_headers(name, cookie, extra),
             })
             if not res then return "callback request: " .. err end
             return res.status .. " " .. tostring(res.headers["Location"])
@@ -532,5 +539,51 @@ destination: nil
 --- main_config
 env SAML_DATA_DIR=./;
 env TZ=XXX-14;
+--- response_body
+302 /
+
+
+
+=== TEST 18: a configured ACS URL settles what the endpoint checks compare against
+--- config
+    location /t {
+        content_by_lua_block {
+            local elsewhere = saml_response({
+                confirmations = confirmation({ recipient = "https://sp.example.com/acs" }),
+            })
+            local here = saml_response({ confirmations = confirmation({ recipient = ACS }) })
+            local forged = {
+                ["X-Forwarded-Proto"] = "https",
+                ["X-Forwarded-Host"] = "sp.example.com",
+            }
+
+            -- assembled from the request, the endpoint moves with the headers
+            ngx.say(login_with("plain", elsewhere, forged))
+            -- configured, it stays where the deployment put it
+            ngx.say(login_with("acs", elsewhere, forged))
+            -- and headers that disagree cannot refuse an assertion that names it
+            ngx.say(login_with("acs", here, forged))
+        }
+    }
+--- response_body
+302 /
+401 nil
+302 /
+--- error_log
+offers no subject confirmation this SP can satisfy
+
+
+
+=== TEST 19: an audience with no text leaves the rest of its restriction readable
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.say(login_with("plain", saml_response({
+                conditions = conditions({ body = "<saml:AudienceRestriction>" ..
+                    "<saml:Audience/><saml:Audience>sp</saml:Audience>" ..
+                    "</saml:AudienceRestriction>" }),
+            })))
+        }
+    }
 --- response_body
 302 /

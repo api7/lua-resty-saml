@@ -574,11 +574,14 @@ static void push_audience_restrictions(lua_State* L, saml_assertion_t* a) {
     saml_audience_restriction_t* restriction = a->audience_restrictions + i;
     lua_pushinteger(L, i + 1);
     lua_newtable(L);
+    // a dense index, so an audience with no text leaves no hole for ipairs to
+    // stop at and shorten the list the assertion declared
+    int n = 0;
     for (size_t j = 0; j < restriction->audiences_len; j++) {
       if (restriction->audiences[j] == NULL) {
         continue;
       }
-      lua_pushinteger(L, j + 1);
+      lua_pushinteger(L, ++n);
       lua_pushstring(L, (char*)restriction->audiences[j]);
       lua_settable(L, -3);
     }

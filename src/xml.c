@@ -383,7 +383,12 @@ static int read_assertion(xmlDoc* doc, xmlNode* node, saml_assertion_t* a) {
 
     for (xmlNode* child = conditions->children; child != NULL; child = child->next) {
       if (child->type == XML_ELEMENT_NODE && !is_known_condition(child)) {
+        // the caller refuses the assertion on this name, so losing it would
+        // let the condition through rather than fail the read
         a->unknown_condition = xmlStrdup(child->name);
+        if (a->unknown_condition == NULL) {
+          return -1;
+        }
         break;
       }
     }

@@ -165,15 +165,28 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
                 spec.method or BEARER, data)
         end
 
-        -- Conditions follows Subject, the order the schema prescribes
+        function authn_statement(session_expires)
+            if session_expires == nil then
+                return ""
+            end
+            return string.format('<saml:AuthnStatement AuthnInstant="2026-07-21T00:00:00Z"%s>' ..
+                '<saml:AuthnContext><saml:AuthnContextClassRef>' ..
+                'urn:oasis:names:tc:SAML:2.0:ac:classes:Password' ..
+                '</saml:AuthnContextClassRef></saml:AuthnContext></saml:AuthnStatement>',
+                attr("SessionNotOnOrAfter", session_expires))
+        end
+
+        -- Subject, then Conditions, then the statements, the order the schema
+        -- prescribes
         function assertion(spec)
             spec = spec or {}
             return string.format('<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ' ..
                 'ID="%s" Version="2.0" IssueInstant="2026-07-21T00:00:00Z">' ..
                 '<saml:Issuer>%s</saml:Issuer>' ..
-                '<saml:Subject><saml:NameID>%s</saml:NameID>%s</saml:Subject>%s</saml:Assertion>',
+                '<saml:Subject><saml:NameID>%s</saml:NameID>%s</saml:Subject>%s%s</saml:Assertion>',
                 spec.id or "a1", IDP, spec.name_id or "signed\@example.com",
-                spec.confirmations or "", spec.conditions or "")
+                spec.confirmations or "", spec.conditions or "",
+                authn_statement(spec.session_expires))
         end
 
         function response(body, destination)
@@ -220,6 +233,36 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
             })
             if not res then return "callback request: " .. err end
             return res.status .. " " .. tostring(res.headers["Location"])
+        end
+
+        -- log in, then ask the app again carrying the session the callback
+        -- handed out: a live session answers 200, an expired one starts over
+        function session_after_login(name, xml)
+            local httpc = require("resty.http").new()
+            local base = "http://127.0.0.1:1984"
+            local headers = { ["X-Test-SP"] = name }
+
+            local res = assert(httpc:request_uri(base .. "/", { headers = headers }))
+            local cookie = res.headers["Set-Cookie"]
+            if type(cookie) == "table" then cookie = cookie[1] end
+            local state = res.headers["Location"]:match("RelayState=([^&]+)")
+
+            res = assert(httpc:request_uri(base .. "/acs", {
+                method = "POST",
+                body = "SAMLResponse=" .. ngx.escape_uri(saml.base64_encode(xml)) ..
+                    "&RelayState=" .. state,
+                headers = callback_headers(name, cookie),
+            }))
+            if res.status ~= 302 then return "callback: " .. res.status end
+
+            local rotated = res.headers["Set-Cookie"]
+            if type(rotated) == "table" then rotated = rotated[1] end
+            if rotated then cookie = rotated end
+
+            res = assert(httpc:request_uri(base .. "/", {
+                headers = { ["X-Test-SP"] = name, ["Cookie"] = cookie:match("^[^;]+") },
+            }))
+            return res.status
         end
 
         function parse(xml)
@@ -620,3 +663,23 @@ offers no subject confirmation this SP can satisfy
 401 nil
 --- error_log
 offers no subject confirmation this SP can satisfy
+
+
+
+=== TEST 21: session lifetime follows the IdP's clock, not the machine's
+--- config
+    location /t {
+        content_by_lua_block {
+            -- ten minutes of session left, with the worker fourteen hours
+            -- ahead of UTC: read as local time it would already be spent
+            ngx.say(session_after_login("plain", saml_response({ session_expires = at(600) })))
+            -- and ten minutes past, which is spent either way
+            ngx.say(session_after_login("plain", saml_response({ session_expires = at(-600) })))
+        }
+    }
+--- main_config
+env SAML_DATA_DIR=./;
+env TZ=XXX-14;
+--- response_body
+200
+302

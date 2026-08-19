@@ -468,11 +468,12 @@ local function login_callback(self, opts)
     local expires
     if session_expires then
         expires, err = parse_iso8601_utc_time(session_expires)
-        ngx.log(ngx.INFO, "login callback: session_expires=", os.date("%Y-%m-%d %T %z", expires))
         if err then
             ngx.say(err)
             ngx.exit(500)
         end
+        ngx.log(ngx.INFO, "login callback: session_expires=",
+            os.date("!%Y-%m-%d %TZ", expires))
     end
 
 

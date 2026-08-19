@@ -360,6 +360,9 @@ static int read_subject_confirmations(xmlNode* subject, saml_assertion_t* a) {
     if (data == NULL) {
       continue;
     }
+    // reported, because a confirmation carrying no data states no condition,
+    // which reads the same as one whose every condition holds
+    confirmation->has_data = 1;
     confirmation->recipient = xmlGetNoNsProp(data, (const xmlChar*)"Recipient");
     confirmation->not_before = xmlGetNoNsProp(data, (const xmlChar*)"NotBefore");
     confirmation->not_on_or_after = xmlGetNoNsProp(data, (const xmlChar*)"NotOnOrAfter");

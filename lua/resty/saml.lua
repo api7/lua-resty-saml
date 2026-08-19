@@ -333,6 +333,13 @@ end
 -- the confirmation data allows. Several confirmations can be offered and any one
 -- of them being satisfiable is enough.
 local function confirmation_ok(confirmation, acs_url, now, skew)
+    -- a confirmation carrying no SubjectConfirmationData states no condition,
+    -- and one that states nothing confirms nothing. Counting it as satisfied
+    -- would let it answer for a sibling that does bind the assertion, which
+    -- disarms every check below with one empty element.
+    if not confirmation.has_data then
+        return false
+    end
     if confirmation.recipient and confirmation.recipient ~= acs_url then
         return false
     end

@@ -595,3 +595,28 @@ offers no subject confirmation this SP can satisfy
     }
 --- response_body
 302 /
+
+
+
+=== TEST 20: a confirmation that states nothing confirms nothing
+--- config
+    location /t {
+        content_by_lua_block {
+            -- the only confirmation carries no SubjectConfirmationData, so the
+            -- assertion names neither an endpoint nor a window
+            ngx.say(login_with("plain", saml_response({
+                confirmations = confirmation({ data = false }),
+            })))
+            -- and an empty one cannot answer for a sibling that binds the
+            -- assertion somewhere else
+            ngx.say(login_with("plain", saml_response({
+                confirmations = confirmation({ recipient = "https://evil.example.com/acs" }) ..
+                    confirmation({ data = false }),
+            })))
+        }
+    }
+--- response_body
+401 nil
+401 nil
+--- error_log
+offers no subject confirmation this SP can satisfy

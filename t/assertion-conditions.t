@@ -683,3 +683,20 @@ env TZ=XXX-14;
 --- response_body
 200
 302
+
+
+
+=== TEST 22: a newline smuggled into the response cannot split a log line
+--- config
+    location /t {
+        content_by_lua_block {
+            -- Destination rides the unsigned wrapper, so it is the sender's to
+            -- write, and a character reference is not folded to a space the way
+            -- a literal newline would be
+            ngx.say(login_with("plain", saml_response({}, "https://x&#10;WARNING-forged-entry")))
+        }
+    }
+--- response_body
+401 nil
+--- error_log
+addressed to https://x\x0AWARNING-forged-entry

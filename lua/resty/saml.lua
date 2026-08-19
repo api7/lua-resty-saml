@@ -282,6 +282,18 @@ local function parse_iso8601_utc_time(str)
 end
 
 
+-- Values lifted out of the IdP's document end up in the error log, which is
+-- read a line at a time. XML folds a literal newline inside an attribute to a
+-- space, but a character reference survives that, and the Response wrapper is
+-- not covered by the signature, so its Destination is whatever the sender
+-- typed. Escape rather than trust any of it to stay on one line.
+local function loggable(value)
+    return (tostring(value):gsub("%c", function(c)
+        return string.format("\\x%02X", c:byte())
+    end))
+end
+
+
 -- A signature says the message came from the IdP. It does not say the assertion
 -- is still good, that it was issued for this SP, or that it may be presented
 -- here. Those live in the assertion's own Conditions and SubjectConfirmation,
@@ -436,7 +448,7 @@ local function login_callback(self, opts)
 
     local destination = saml.doc_destination(doc)
     if destination and destination ~= acs_url then
-        ngx.log(ngx.ERR, "response from IdP is addressed to ", destination)
+        ngx.log(ngx.ERR, "response from IdP is addressed to ", loggable(destination))
         ngx.exit(ngx.HTTP_UNAUTHORIZED)
     end
 
@@ -448,7 +460,7 @@ local function login_callback(self, opts)
 
     local acceptable, reason = assertions_acceptable(opts, assertions, acs_url, ngx.time())
     if not acceptable then
-        ngx.log(ngx.ERR, "response from IdP rejected: ", reason)
+        ngx.log(ngx.ERR, "response from IdP rejected: ", loggable(reason))
         ngx.exit(ngx.HTTP_UNAUTHORIZED)
     end
 

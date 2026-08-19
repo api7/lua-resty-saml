@@ -339,20 +339,31 @@ static int signature_covers(xmlDoc* doc, xmlNode* sig, xmlNode* node) {
 }
 
 
+// Leave the document with nothing a reader can read that the verified signature
+// does not cover, and say whether that was possible at all.
+//
 // Identity is read from /samlp:Response/saml:Assertion, i.e. only from an
-// assertion that is a direct child of the verified root message. saml_verify_doc
-// checks one Signature but not that it covers the assertion a reader will pick,
-// so remove every top-level assertion that signature leaves out. A signature
-// over the whole message covers all of them. The removed nodes are siblings, so
+// assertion that is a direct child of the root message. saml_verify_doc checks
+// one Signature but not that it covers the assertion a reader will pick, so
+// remove every top-level assertion that signature leaves out. A signature over
+// the whole message covers all of them. The removed nodes are siblings, so
 // freeing one never dangles another.
-static void confine_identity_to_signature(xmlDoc* doc) {
+//
+// A message that carries no assertion has nothing to confine this way, and
+// samlp:Extensions takes elements of any other namespace, so a signed assertion
+// parked there satisfies saml_verify_doc while the message around it stays the
+// sender's to write. Such a message is only trustworthy signed whole.
+static int bind_identity_to_signature(xmlDoc* doc) {
   xmlNode* root = xmlDocGetRootElement(doc);
   if (root == NULL) {
-    return;
+    return 0;
   }
   xmlNode* sig = xmlSecFindNode(root, xmlSecNodeSignature, xmlSecDSigNs);
   if (sig != NULL && signature_covers(doc, sig, root)) {
-    return;
+    return 1;
+  }
+  if (xmlStrEqual(root->name, (const xmlChar*)"Response") != 1) {
+    return 0;
   }
   xmlNode* child = root->children;
   while (child != NULL) {
@@ -363,4 +374,5 @@ static void confine_identity_to_signature(xmlDoc* doc) {
     }
     child = next;
   }
+  return 1;
 }

@@ -33,27 +33,36 @@ static int is_saml_assertion(xmlNode* node) {
 }
 
 
-// The text of node's own Issuer child, or NULL. Issuer is in the assertion
-// namespace wherever it appears, so a look-alike in another one is not it.
-static xmlChar* issuer_of(xmlDoc* doc, xmlNode* node) {
+// The direct child of node named name in namespace ns, or NULL. Only direct
+// children: an element the message itself declares is not the same as one a
+// document-wide search happens to reach first.
+static xmlNode* ns_child(xmlNode* node, const xmlChar* name, const char* ns) {
   for (xmlNode* child = node->children; child != NULL; child = child->next) {
     if (child->type == XML_ELEMENT_NODE &&
-        xmlStrEqual(child->name, (const xmlChar*)"Issuer") == 1 &&
+        xmlStrEqual(child->name, name) == 1 &&
         child->ns != NULL &&
-        xmlStrEqual(child->ns->href, (const xmlChar*)SAML_XMLNS_ASSERTION) == 1) {
-      return xmlNodeListGetString(doc, child->children, 1);
+        xmlStrEqual(child->ns->href, (const xmlChar*)ns) == 1) {
+      return child;
     }
   }
   return NULL;
 }
 
 
+// The text of node's own Issuer child, or NULL. Issuer is in the assertion
+// namespace wherever it appears, so a look-alike in another one is not it.
+static xmlChar* issuer_of(xmlDoc* doc, xmlNode* node) {
+  xmlNode* issuer = ns_child(node, (const xmlChar*)"Issuer", SAML_XMLNS_ASSERTION);
+  return issuer == NULL ? NULL : xmlNodeListGetString(doc, issuer->children, 1);
+}
+
+
 // A Response's issuer is read from its assertion, the element the identity
 // itself comes from. The Response's own Issuer sits outside an assertion-level
 // signature and can be rewritten without breaking it, while every top-level
-// assertion still in the document is one the signature covers. Other messages
-// carry no assertion and are signed whole, so their own Issuer is the one to
-// read.
+// assertion still in the document is one the signature covers. A message that
+// carries no assertion is only accepted signed whole, so its own Issuer is the
+// one to read.
 xmlChar* saml_doc_issuer(xmlDoc* doc) {
   xmlNode* root = xmlDocGetRootElement(doc);
   if (root == NULL) {
@@ -82,7 +91,8 @@ void saml_issuers_free(xmlChar** issuers, size_t issuers_len) {
 
 
 // Every issuer the message attributes content to: one per top-level assertion
-// of a Response, or its own for a message that carries none. A caller matching
+// of a Response, or its own for a message that carries none and is therefore
+// only accepted signed whole. A caller matching
 // the issuer against a policy has to weigh all of them, because doc_attrs reads
 // every top-level assertion and doc_name_id the first one carrying a subject.
 // An assertion with no Issuer is invalid SAML; it is listed as an empty string,
@@ -156,7 +166,8 @@ xmlChar* saml_doc_name_id(xmlDoc* doc) {
   }
 
   if (xmlStrEqual(node->name, (xmlChar*)"LogoutRequest") == 1) {
-    node = xmlSecFindNode(node, (xmlChar*)"NameID", (xmlChar*)SAML_XMLNS_ASSERTION);
+    // the subject the request names, which the schema puts directly under it
+    node = ns_child(node, (const xmlChar*)"NameID", SAML_XMLNS_ASSERTION);
     if (node == NULL) {
       return NULL;
     }
@@ -183,20 +194,6 @@ xmlChar* saml_doc_name_id(xmlDoc* doc) {
 }
 
 
-// The direct child of node named name in the protocol namespace, or NULL.
-static xmlNode* protocol_child(xmlNode* node, const xmlChar* name) {
-  for (xmlNode* child = node->children; child != NULL; child = child->next) {
-    if (child->type == XML_ELEMENT_NODE &&
-        xmlStrEqual(child->name, name) == 1 &&
-        child->ns != NULL &&
-        xmlStrEqual(child->ns->href, (const xmlChar*)SAML_XMLNS_PROTOCOL) == 1) {
-      return child;
-    }
-  }
-  return NULL;
-}
-
-
 xmlChar* saml_doc_status_code(xmlDoc* doc) {
   // Read the top-level message's status directly, not a document-wide match:
   // a nested Response (for example inside saml:Advice) can precede the root
@@ -205,11 +202,11 @@ xmlChar* saml_doc_status_code(xmlDoc* doc) {
   if (root == NULL) {
     return NULL;
   }
-  xmlNode* status = protocol_child(root, (const xmlChar*)"Status");
+  xmlNode* status = ns_child(root, (const xmlChar*)"Status", SAML_XMLNS_PROTOCOL);
   if (status == NULL) {
     return NULL;
   }
-  xmlNode* code = protocol_child(status, (const xmlChar*)"StatusCode");
+  xmlNode* code = ns_child(status, (const xmlChar*)"StatusCode", SAML_XMLNS_PROTOCOL);
   if (code == NULL) {
     return NULL;
   }
@@ -251,7 +248,7 @@ xmlChar* saml_doc_session_index(xmlDoc* doc) {
   }
 
   if (xmlStrEqual(node->name, (xmlChar*)"LogoutRequest") == 1) {
-    node = xmlSecFindNode(node, (xmlChar*)"SessionIndex", (xmlChar*)SAML_XMLNS_PROTOCOL);
+    node = ns_child(node, (const xmlChar*)"SessionIndex", SAML_XMLNS_PROTOCOL);
     if (node == NULL) {
       return NULL;
     }

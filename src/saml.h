@@ -57,6 +57,7 @@ typedef enum {
   SAML_INVALID_DOC,
   SAML_INVALID_SIG_ALG,
   SAML_INVALID_SIGNATURE,
+  SAML_UNSIGNED_IDENTITY,
 } saml_binding_status_t;
 
 char* saml_binding_error_msg(saml_binding_status_t status);

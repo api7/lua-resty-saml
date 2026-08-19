@@ -436,7 +436,7 @@ LogoutResponse: urn:oasis:names:tc:SAML:2.0:status:Success
         }
     }
 --- response_body
-root: ArtifactResponse, name_id: nil, role: nil
+err: signature does not cover the message
 
 
 
@@ -578,3 +578,56 @@ LogoutResponse issuer: https://idp.example.com
     }
 --- response_body
 https://idp.example.com, https://other.example.com
+
+
+
+=== TEST 22: a message with no assertion of its own must be signed whole
+--- config
+    location /t {
+        content_by_lua_block {
+            local key, mngr, transform = saml_ctx()
+            -- the request carries no signature; the only one in the document
+            -- belongs to an assertion parked in Extensions, which samlp
+            -- accepts because it takes any other namespace
+            local stolen = sign(key, transform, assertion("stolen", "attacker@example.com"))
+            local logout = '<samlp:LogoutRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ' ..
+                'xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="lr-1" Version="2.0" ' ..
+                'IssueInstant="2026-07-21T00:00:00Z"><saml:Issuer>https://attacker.example.com</saml:Issuer>' ..
+                '<samlp:Extensions>' .. stolen .. '</samlp:Extensions>' ..
+                '<saml:NameID>victim@example.com</saml:NameID></samlp:LogoutRequest>'
+            local doc, err = submit(mngr, logout)
+            if err then
+                ngx.say("err: ", err)
+            else
+                ngx.say("issuer: ", tostring(saml.doc_issuer(doc)),
+                    ", name_id: ", tostring(saml.doc_name_id(doc)))
+            end
+        }
+    }
+--- response_body
+err: signature does not cover the message
+
+
+
+=== TEST 23: a logout request names its own subject, not one parked in Extensions
+--- config
+    location /t {
+        content_by_lua_block {
+            local key, mngr, transform = saml_ctx()
+            local logout = '<samlp:LogoutRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ' ..
+                'xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="lr-1" Version="2.0" ' ..
+                'IssueInstant="2026-07-21T00:00:00Z"><saml:Issuer>https://idp.example.com</saml:Issuer>' ..
+                '<samlp:Extensions><saml:NameID>elsewhere@example.com</saml:NameID></samlp:Extensions>' ..
+                '<saml:NameID>victim@example.com</saml:NameID>' ..
+                '<samlp:SessionIndex>s-1</samlp:SessionIndex></samlp:LogoutRequest>'
+            local doc, err = submit(mngr, sign(key, transform, logout))
+            if err then
+                ngx.say("err: ", err)
+            else
+                ngx.say("name_id: ", tostring(saml.doc_name_id(doc)),
+                    ", session_index: ", tostring(saml.doc_session_index(doc)))
+            end
+        }
+    }
+--- response_body
+name_id: victim@example.com, session_index: s-1

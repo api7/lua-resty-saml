@@ -96,6 +96,7 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
             plain = {},
             skew = { clock_skew = 300 },
             audiences = { sp_audiences = { "https://sp.example.com/metadata" } },
+            acs = { sp_acs_url = "http://127.0.0.1:1984/acs" },
             replay = { replay_dict = "saml_replay" },
         }
         SPS = {}
@@ -206,9 +207,19 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
             return saml.doc_id(doc)
         end
 
+        function callback_headers(name, cookie, extra)
+            local headers = {
+                ["X-Test-SP"] = name,
+                ["Cookie"] = cookie:match("^[^;]+"),
+                ["Content-Type"] = "application/x-www-form-urlencoded",
+            }
+            for k, v in pairs(extra or {}) do headers[k] = v end
+            return headers
+        end
+
         -- start a login, then hand the crafted response back to the callback
         -- with the session and RelayState that login handed out
-        function login_with(name, xml)
+        function login_with(name, xml, extra)
             local httpc = require("resty.http").new()
             local base = "http://127.0.0.1:1984"
             local headers = { ["X-Test-SP"] = name }
@@ -229,11 +240,7 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
                 method = "POST",
                 body = "SAMLResponse=" .. ngx.escape_uri(saml.base64_encode(xml)) ..
                     "&RelayState=" .. state,
-                headers = {
-                    ["X-Test-SP"] = name,
-                    ["Cookie"] = cookie:match("^[^;]+"),
-                    ["Content-Type"] = "application/x-www-form-urlencoded",
-                },
+                headers = callback_headers(name, cookie, extra),
             })
             if not res then return "callback request: " .. err end
             return res.status .. " " .. tostring(res.headers["Location"])
@@ -282,7 +289,6 @@ __DATA__
 302 /
 
 
-
 === TEST 2: an expired assertion is refused however it is replayed
 --- config
     location /t {
@@ -298,7 +304,6 @@ __DATA__
 is not valid on or after
 
 
-
 === TEST 3: an assertion whose window has not opened is refused
 --- config
     location /t {
@@ -312,7 +317,6 @@ is not valid on or after
 401 nil
 --- error_log
 is not valid before
-
 
 
 === TEST 4: the clock skew allowance covers a small difference with the IdP
@@ -331,7 +335,6 @@ is not valid before
 is not valid on or after
 
 
-
 === TEST 5: an assertion restricted to another SP is refused
 --- config
     location /t {
@@ -348,7 +351,6 @@ is not valid on or after
 is restricted to https://other.example.com
 
 
-
 === TEST 6: an assertion restricted to this SP is accepted
 --- config
     location /t {
@@ -360,7 +362,6 @@ is restricted to https://other.example.com
     }
 --- response_body
 302 /
-
 
 
 === TEST 7: sp_audiences names the audience the IdP was configured with
@@ -381,7 +382,6 @@ is restricted to https://other.example.com
 is restricted to https://sp.example.com/metadata
 
 
-
 === TEST 8: each AudienceRestriction narrows the audience on its own
 --- config
     location /t {
@@ -400,7 +400,6 @@ is restricted to https://sp.example.com/metadata
 is restricted to https://other.example.com
 
 
-
 === TEST 9: a confirmation addressed to another endpoint is refused
 --- config
     location /t {
@@ -416,7 +415,6 @@ is restricted to https://other.example.com
 offers no subject confirmation this SP can satisfy
 
 
-
 === TEST 10: a confirmation addressed here and still open is accepted
 --- config
     location /t {
@@ -428,7 +426,6 @@ offers no subject confirmation this SP can satisfy
     }
 --- response_body
 302 /
-
 
 
 === TEST 11: a confirmation that has run out is refused
@@ -446,7 +443,6 @@ offers no subject confirmation this SP can satisfy
 offers no subject confirmation this SP can satisfy
 
 
-
 === TEST 12: one satisfiable confirmation among several is enough
 --- config
     location /t {
@@ -459,7 +455,6 @@ offers no subject confirmation this SP can satisfy
     }
 --- response_body
 302 /
-
 
 
 === TEST 13: an unrecognised condition leaves the assertion indeterminate
@@ -484,7 +479,6 @@ offers no subject confirmation this SP can satisfy
 carries an unrecognised condition Condition
 
 
-
 === TEST 14: a response addressed to another endpoint is refused
 --- config
     location /t {
@@ -500,7 +494,6 @@ carries an unrecognised condition Condition
 response from IdP is addressed to http://evil.example.com/acs
 
 
-
 === TEST 15: an assertion carrying no constraints is still accepted
 --- config
     location /t {
@@ -510,7 +503,6 @@ response from IdP is addressed to http://evil.example.com/acs
     }
 --- response_body
 302 /
-
 
 
 === TEST 16: the constraints are reported per assertion, not pooled
@@ -540,7 +532,6 @@ a2 conditions=false expires=nil audiences=0 confirmations=1
 destination: nil
 
 
-
 === TEST 17: a UTC timestamp is read as UTC whatever the machine's timezone is
 --- config
     location /t {
@@ -560,8 +551,51 @@ env TZ=XXX-14;
 302 /
 
 
+=== TEST 18: a configured ACS URL settles what the endpoint checks compare against
+--- config
+    location /t {
+        content_by_lua_block {
+            local elsewhere = saml_response({
+                confirmations = confirmation({ recipient = "https://sp.example.com/acs" }),
+            })
+            local here = saml_response({ confirmations = confirmation({ recipient = ACS }) })
+            local forged = {
+                ["X-Forwarded-Proto"] = "https",
+                ["X-Forwarded-Host"] = "sp.example.com",
+            }
 
-=== TEST 18: a response answering another request is refused
+            -- assembled from the request, the endpoint moves with the headers
+            ngx.say(login_with("plain", elsewhere, forged))
+            -- configured, it stays where the deployment put it
+            ngx.say(login_with("acs", elsewhere, forged))
+            -- and headers that disagree cannot refuse an assertion that names it
+            ngx.say(login_with("acs", here, forged))
+        }
+    }
+--- response_body
+302 /
+401 nil
+302 /
+--- error_log
+offers no subject confirmation this SP can satisfy
+
+
+=== TEST 19: an audience with no text leaves the rest of its restriction readable
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.say(login_with("plain", saml_response({
+                conditions = conditions({ body = "<saml:AudienceRestriction>" ..
+                    "<saml:Audience/><saml:Audience>sp</saml:Audience>" ..
+                    "</saml:AudienceRestriction>" }),
+            })))
+        }
+    }
+--- response_body
+302 /
+
+
+=== TEST 20: a response answering another request is refused
 --- config
     location /t {
         content_by_lua_block {
@@ -574,8 +608,7 @@ env TZ=XXX-14;
 response from IdP answers request ID_some-other-request
 
 
-
-=== TEST 19: a confirmation answering another request is refused
+=== TEST 21: a confirmation answering another request is refused
 --- config
     location /t {
         content_by_lua_block {
@@ -592,8 +625,7 @@ response from IdP answers request ID_some-other-request
 offers no subject confirmation this SP can satisfy
 
 
-
-=== TEST 20: a response answering this SP's own request is accepted
+=== TEST 22: a response answering this SP's own request is accepted
 --- config
     location /t {
         content_by_lua_block {
@@ -608,8 +640,7 @@ offers no subject confirmation this SP can satisfy
 302 /
 
 
-
-=== TEST 21: an assertion is good for one login
+=== TEST 23: an assertion is good for one login
 --- config
     location /t {
         content_by_lua_block {
@@ -625,8 +656,7 @@ offers no subject confirmation this SP can satisfy
 assertion a1 has been presented already
 
 
-
-=== TEST 22: a second assertion of its own is accepted
+=== TEST 24: a second assertion of its own is accepted
 --- config
     location /t {
         content_by_lua_block {
@@ -639,8 +669,7 @@ assertion a1 has been presented already
 302 /
 
 
-
-=== TEST 23: an assertion is remembered for as long as it is usable
+=== TEST 25: an assertion is remembered for as long as it is usable
 --- config
     location /t {
         content_by_lua_block {

@@ -97,6 +97,7 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
         SPS = {}
 
         function sp(name)
+            assert(name == "none" or ALLOW_LISTS[name] ~= nil, "no allow-list named " .. name)
             if SPS[name] == nil then
                 SPS[name] = require("resty.saml").new({
                     sp_issuer = "sp",
@@ -298,3 +299,55 @@ unexpected issuer in response from IdP: https://other.example.com
 401 nil
 --- error_log
 unexpected issuer in response from IdP: none readable
+
+
+
+=== TEST 8: an issuer the IdP indented still matches the configured one
+--- config
+    location /t {
+        content_by_lua_block {
+            local padded = "\n        " .. IDP .. "\n      "
+            ngx.say(login_with("exact", response(IDP, sign_doc(assertion(padded, "a1", "signed@example.com")))))
+        }
+    }
+--- response_body
+302 /
+
+
+
+=== TEST 9: a shape the allow-list cannot be read from is a construction error
+--- config
+    location /t {
+        content_by_lua_block {
+            local cases = {
+                ["a bare string"] = "https://idp.example.com",
+                ["a map"] = { ["https://idp.example.com"] = true },
+                ["a list with a gap"] = { [1] = "https://idp.example.com", [3] = "https://other.example.com" },
+                ["ngx.null"] = ngx.null,
+            }
+            local lines = {}
+            for name, value in pairs(cases) do
+                local ok, err = pcall(function()
+                    return require("resty.saml").new({
+                        sp_issuer = "sp",
+                        idp_uri = "http://127.0.0.1:1984/idp",
+                        login_callback_uri = "/acs",
+                        sp_cert = CERT_PEM,
+                        sp_private_key = KEY_PEM,
+                        idp_cert = CERT_PEM,
+                        idp_issuers = value,
+                    })
+                end)
+                -- pairs order is not fixed, so sort rather than assert on it
+                lines[#lines + 1] = name .. ": " ..
+                    (ok and "accepted" or (tostring(err):gsub(".*: ", "")))
+            end
+            table.sort(lines)
+            ngx.say(table.concat(lines, "\n"))
+        }
+    }
+--- response_body
+a bare string: idp_issuers must be a list of strings
+a list with a gap: idp_issuers must be a list of strings
+a map: idp_issuers must be a list of strings
+ngx.null: idp_issuers must be a list of strings

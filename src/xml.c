@@ -63,6 +63,12 @@ static xmlChar* issuer_of(xmlDoc* doc, xmlNode* node) {
 // assertion still in the document is one the signature covers. A message that
 // carries no assertion is only accepted signed whole, so its own Issuer is the
 // one to read.
+//
+// Like the other accessors, this expects a document one of the two verify paths
+// let through, and each path keeps that property its own way: the POST binding
+// by pruning what the signature leaves out, the redirect binding by signing the
+// encoded message whole and never pruning at all. Narrowing either one is what
+// would cost this its footing.
 xmlChar* saml_doc_issuer(xmlDoc* doc) {
   xmlNode* root = xmlDocGetRootElement(doc);
   if (root == NULL) {

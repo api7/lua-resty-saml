@@ -258,6 +258,41 @@ local function parse_iso8601_utc_time(str)
     return os.time{year=year, month=month, day=day, hour=hour, min=min, sec=sec}
 end
 
+-- An Issuer is a string in the XML schema, so libxml2 hands back the element
+-- text as written, indentation included. Compare what the two sides mean.
+local function trim(s)
+    return (s:gsub("^%s*(.-)%s*$", "%1"))
+end
+
+-- Read idp_issuers once, into a set. A shape the callback cannot walk is a
+-- configuration mistake, and finding out at construction names the option,
+-- where finding out per request is a 500 or a blanket refusal that blames the
+-- IdP. An empty list stays legal and means what it says: nobody is expected.
+local function issuer_set(issuers)
+    if issuers == nil then
+        return nil
+    end
+
+    local invalid = "idp_issuers must be a list of strings"
+    if type(issuers) ~= "table" then
+        error(invalid, 3)
+    end
+
+    local set, count = {}, 0
+    for i, issuer in pairs(issuers) do
+        if type(i) ~= "number" or i % 1 ~= 0 or i < 1 or type(issuer) ~= "string" then
+            error(invalid, 3)
+        end
+        set[trim(issuer)] = true
+        count = count + 1
+    end
+    -- a gap would leave the entries past it unreachable to ipairs
+    if count ~= #issuers then
+        error(invalid, 3)
+    end
+    return set
+end
+
 -- A valid signature says the message came from the configured key. It does not
 -- say which IdP that key speaks for, so pin the issuer when the caller names
 -- the ones it expects. No list keeps the previous behaviour; a list nothing
@@ -275,14 +310,7 @@ local function issuers_allowed(allowed, issuers)
         return false, "none readable"
     end
     for _, issuer in ipairs(issuers) do
-        local ok = false
-        for _, expected in ipairs(allowed) do
-            if expected == issuer then
-                ok = true
-                break
-            end
-        end
-        if not ok then
+        if not allowed[trim(issuer)] then
             return false, issuer
         end
     end
@@ -332,7 +360,7 @@ local function login_callback(self, opts)
     local name_id = saml.doc_name_id(doc)
     local session_index = saml.doc_session_index(doc)
 
-    local allowed, unexpected = issuers_allowed(opts.idp_issuers, saml.doc_issuers(doc))
+    local allowed, unexpected = issuers_allowed(self.idp_issuers, saml.doc_issuers(doc))
     if not allowed then
         ngx.log(ngx.ERR, "unexpected issuer in response from IdP: ", tostring(unexpected))
         ngx.exit(ngx.HTTP_UNAUTHORIZED)
@@ -531,6 +559,7 @@ function _M.new(opts)
     obj.key_mngr_from_doc = function(doc) return obj.idp_cert_manager end
     obj.idp_cert_func = function(doc) return idp_cert end
     obj.auth_protocol_binding_method = opts.auth_protocol_binding_method
+    obj.idp_issuers = issuer_set(opts.idp_issuers)
     local cookie_secure, cookie_same_site
     if opts.auth_protocol_binding_method == "HTTP-POST" then
         cookie_secure = true

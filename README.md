@@ -73,7 +73,7 @@ local saml = resty_saml.new(opts)
 | `sp_issuer`      | string       | None      | SP name to access IdP.       |
 | `idp_uri`      | string       | None      | URI of IdP.       |
 | `idp_cert`      | string       | None      | IdP Certificate, used to verify saml response.       |
-| `idp_issuers`      | array of strings       | None      | Issuers accepted on a login response; every assertion it carries has to name one. Unset accepts any issuer the `idp_cert` signs for.       |
+| `idp_issuers`      | array of strings       | None      | Issuers accepted on a login response; every assertion it carries has to name one. Unset accepts any issuer the `idp_cert` signs for, which is not the same as an empty list: that one accepts nobody.       |
 | `login_callback_uri`      | string       | None      | redirect uri used to callback the SP from IdP after login.       |
 | `logout_uri`      | string       | None      | logout uri to trigger logout.       |
 | `logout_callback_uri`      | string       | None      | redirect uri used to callback the SP from IdP after logout.       |

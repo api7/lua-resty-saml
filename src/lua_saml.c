@@ -386,7 +386,7 @@ static int doc_name_id(lua_State* L) {
 
 
 /***
-Get the text of the issuer node
+Get the issuer of the assertion a Response carries, or of the message itself
 @function doc_issuer
 @tparam xmlDoc* doc
 @treturn ?string issuer

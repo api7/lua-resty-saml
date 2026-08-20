@@ -362,6 +362,8 @@ static int bind_identity_to_signature(xmlDoc* doc) {
   if (sig != NULL && signature_covers(doc, sig, root)) {
     return 1;
   }
+  // matching the name alone is enough because schema validation, which runs
+  // before any of this, has already refused a root in another namespace
   if (xmlStrEqual(root->name, (const xmlChar*)"Response") != 1) {
     return 0;
   }

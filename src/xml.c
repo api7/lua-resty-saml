@@ -351,3 +351,272 @@ void saml_attrs_free(saml_attr_t* attrs, size_t attrs_len) {
   }
   free(attrs);
 }
+
+
+// An absent attribute and one whose value could not be copied both come back
+// NULL from xmlGetNoNsProp, and every caller here reads NULL as "the IdP said
+// nothing". For a bound or an endpoint that is a constraint quietly dropped, so
+// tell the two apart and let the read fail rather than the check.
+static int read_attr(xmlNode* node, const char* name, xmlChar** out) {
+  *out = xmlGetNoNsProp(node, (const xmlChar*)name);
+  if (*out == NULL && xmlHasNsProp(node, (const xmlChar*)name, NULL) != NULL) {
+    return -1;
+  }
+  return 0;
+}
+
+
+// A direct child element of node named name in the assertion namespace.
+static int is_assertion_el(xmlNode* node, const char* name) {
+  return node->type == XML_ELEMENT_NODE &&
+    xmlStrEqual(node->name, (const xmlChar*)name) == 1 &&
+    node->ns != NULL &&
+    xmlStrEqual(node->ns->href, (const xmlChar*)SAML_XMLNS_ASSERTION) == 1;
+}
+
+
+static xmlNode* assertion_child(xmlNode* node, const char* name) {
+  for (xmlNode* child = node->children; child != NULL; child = child->next) {
+    if (is_assertion_el(child, name)) {
+      return child;
+    }
+  }
+  return NULL;
+}
+
+
+static size_t count_assertion_el(xmlNode* parent, const char* name) {
+  size_t n = 0;
+  for (xmlNode* child = parent->children; child != NULL; child = child->next) {
+    if (is_assertion_el(child, name)) {
+      n++;
+    }
+  }
+  return n;
+}
+
+
+// Conditions this SP can actually satisfy. SAML Core 2.5.1 makes an assertion
+// carrying any other one Indeterminate rather than valid, so everything else is
+// reported for the caller to refuse.
+//
+// ProxyRestriction is here because it binds an IdP issuing on behalf of another
+// IdP and asks nothing of the SP consuming the assertion. OneTimeUse is not,
+// because honouring it means remembering which assertions have been spent, and
+// Core 2.5.1.5 tells a party that cannot keep that record to treat the
+// assertion as invalid.
+static int is_known_condition(xmlNode* node) {
+  return is_assertion_el(node, "AudienceRestriction") ||
+    is_assertion_el(node, "ProxyRestriction");
+}
+
+
+// Each AudienceRestriction is a separate restriction and the assertion applies
+// only where all of them do, so they are kept apart rather than flattened.
+static int read_audience_restrictions(xmlDoc* doc, xmlNode* conditions, saml_assertion_t* a) {
+  size_t count = count_assertion_el(conditions, "AudienceRestriction");
+  if (count == 0) {
+    return 0;
+  }
+
+  a->audience_restrictions = calloc(count, sizeof(saml_audience_restriction_t));
+  if (a->audience_restrictions == NULL) {
+    return -1;
+  }
+  a->audience_restrictions_len = count;
+
+  size_t i = 0;
+  for (xmlNode* node = conditions->children; node != NULL; node = node->next) {
+    if (!is_assertion_el(node, "AudienceRestriction")) {
+      continue;
+    }
+
+    saml_audience_restriction_t* restriction = a->audience_restrictions + i++;
+    size_t audiences = count_assertion_el(node, "Audience");
+    if (audiences == 0) {
+      continue;
+    }
+
+    restriction->audiences = calloc(audiences, sizeof(xmlChar*));
+    if (restriction->audiences == NULL) {
+      return -1;
+    }
+    restriction->audiences_len = audiences;
+
+    size_t j = 0;
+    for (xmlNode* child = node->children; child != NULL; child = child->next) {
+      if (is_assertion_el(child, "Audience")) {
+        restriction->audiences[j++] = xmlNodeListGetString(doc, child->children, 1);
+      }
+    }
+  }
+  return 0;
+}
+
+
+static int read_subject_confirmations(xmlNode* subject, saml_assertion_t* a) {
+  size_t count = count_assertion_el(subject, "SubjectConfirmation");
+  if (count == 0) {
+    return 0;
+  }
+
+  a->confirmations = calloc(count, sizeof(saml_subject_confirmation_t));
+  if (a->confirmations == NULL) {
+    return -1;
+  }
+  a->confirmations_len = count;
+
+  size_t i = 0;
+  for (xmlNode* node = subject->children; node != NULL; node = node->next) {
+    if (!is_assertion_el(node, "SubjectConfirmation")) {
+      continue;
+    }
+
+    saml_subject_confirmation_t* confirmation = a->confirmations + i++;
+    if (read_attr(node, "Method", &confirmation->method) < 0) {
+      return -1;
+    }
+
+    xmlNode* data = assertion_child(node, "SubjectConfirmationData");
+    if (data == NULL) {
+      continue;
+    }
+    if (read_attr(data, "Recipient", &confirmation->recipient) < 0 ||
+        read_attr(data, "NotBefore", &confirmation->not_before) < 0 ||
+        read_attr(data, "NotOnOrAfter", &confirmation->not_on_or_after) < 0 ||
+        read_attr(data, "InResponseTo", &confirmation->in_response_to) < 0) {
+      return -1;
+    }
+  }
+  return 0;
+}
+
+
+static int read_assertion(xmlDoc* doc, xmlNode* node, saml_assertion_t* a) {
+  if (read_attr(node, "ID", &a->id) < 0) {
+    return -1;
+  }
+
+  xmlNode* conditions = assertion_child(node, "Conditions");
+  if (conditions != NULL) {
+    a->has_conditions = 1;
+    if (read_attr(conditions, "NotBefore", &a->not_before) < 0 ||
+        read_attr(conditions, "NotOnOrAfter", &a->not_on_or_after) < 0) {
+      return -1;
+    }
+
+    for (xmlNode* child = conditions->children; child != NULL; child = child->next) {
+      if (child->type == XML_ELEMENT_NODE && !is_known_condition(child)) {
+        // the caller refuses the assertion on this name, so losing it would
+        // let the condition through rather than fail the read
+        a->unknown_condition = xmlStrdup(child->name);
+        if (a->unknown_condition == NULL) {
+          return -1;
+        }
+        break;
+      }
+    }
+
+    if (read_audience_restrictions(doc, conditions, a) < 0) {
+      return -1;
+    }
+  }
+
+  xmlNode* subject = assertion_child(node, "Subject");
+  if (subject != NULL && read_subject_confirmations(subject, a) < 0) {
+    return -1;
+  }
+  return 0;
+}
+
+
+// The constraints every top-level assertion of a Response attaches to itself:
+// the validity window, the audiences it is restricted to, and the subject
+// confirmations that say where and until when it may be presented. They are
+// reported per assertion because they belong to one assertion rather than to
+// the document, and a reader consumes several. Messages carrying no assertion
+// report none.
+int saml_doc_assertions(xmlDoc* doc, saml_assertion_t** assertions, size_t* assertions_len) {
+  *assertions = NULL;
+  *assertions_len = 0;
+
+  xmlNode* root = xmlDocGetRootElement(doc);
+  if (root == NULL || xmlStrEqual(root->name, (const xmlChar*)"Response") != 1) {
+    return 0;
+  }
+
+  size_t count = 0;
+  for (xmlNode* child = root->children; child != NULL; child = child->next) {
+    if (is_saml_assertion(child)) {
+      count++;
+    }
+  }
+  if (count == 0) {
+    return 0;
+  }
+
+  saml_assertion_t* list = calloc(count, sizeof(saml_assertion_t));
+  if (list == NULL) {
+    return -1;
+  }
+
+  size_t i = 0;
+  for (xmlNode* child = root->children; child != NULL; child = child->next) {
+    if (!is_saml_assertion(child)) {
+      continue;
+    }
+    if (read_assertion(doc, child, list + i++) < 0) {
+      saml_assertions_free(list, count);
+      return -1;
+    }
+  }
+
+  *assertions = list;
+  *assertions_len = count;
+  return 0;
+}
+
+
+// The Destination of the root message, through an out parameter so that a value
+// which could not be read is distinguishable from one that is absent. The caller
+// skips the check on absent, which is the wrong answer for the other.
+int saml_doc_destination(xmlDoc* doc, xmlChar** destination) {
+  *destination = NULL;
+
+  xmlNode* root = xmlDocGetRootElement(doc);
+  if (root == NULL) {
+    return 0;
+  }
+  return read_attr(root, "Destination", destination);
+}
+
+
+void saml_assertions_free(saml_assertion_t* assertions, size_t assertions_len) {
+  for (size_t i = 0; i < assertions_len; i++) {
+    saml_assertion_t* a = assertions + i;
+    xmlFree(a->id);
+    xmlFree(a->not_before);
+    xmlFree(a->not_on_or_after);
+    xmlFree(a->unknown_condition);
+
+    for (size_t j = 0; j < a->audience_restrictions_len; j++) {
+      saml_audience_restriction_t* restriction = a->audience_restrictions + j;
+      for (size_t k = 0; k < restriction->audiences_len; k++) {
+        xmlFree(restriction->audiences[k]);
+      }
+      free(restriction->audiences);
+    }
+    free(a->audience_restrictions);
+
+    for (size_t j = 0; j < a->confirmations_len; j++) {
+      saml_subject_confirmation_t* confirmation = a->confirmations + j;
+      xmlFree(confirmation->method);
+      xmlFree(confirmation->recipient);
+      xmlFree(confirmation->not_before);
+      xmlFree(confirmation->not_on_or_after);
+      xmlFree(confirmation->in_response_to);
+    }
+    free(a->confirmations);
+  }
+  free(assertions);
+}

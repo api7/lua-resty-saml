@@ -126,6 +126,15 @@ local function saml_get_redirect_uri(path)
     return scheme .. "://" .. host .. path
 end
 
+-- The endpoint the IdP delivers the response to. A configured value wins over
+-- the one assembled from request headers, which the requester can steer, and it
+-- is what an SP behind a proxy that rewrites neither scheme nor host needs.
+-- The same value is announced to the IdP and enforced on the way back, so the
+-- two cannot drift.
+local function sp_acs_url(opts)
+    return opts.sp_acs_url or saml_get_redirect_uri(opts.login_callback_uri)
+end
+
 local function interp(s, tab)
     return s:gsub('($%b{})', function(w)
         local key = w:sub(3, -2)
@@ -151,7 +160,7 @@ local AUTHN_REQUEST = [[
 
 local function authn_request(opts)
     return interp(AUTHN_REQUEST, {
-        acs_url = saml_get_redirect_uri(opts.login_callback_uri),
+        acs_url = sp_acs_url(opts),
         destination = opts.idp_uri,
         issue_instant = os.date("!%Y-%m-%dT%TZ"),
         issuer = opts.sp_issuer,
@@ -225,9 +234,28 @@ local function login(self, opts)
     return ngx.redirect(opts.idp_uri .. "?" .. query_str)
 end
 
+-- Days since 1970-01-01 for a civil date. os.time reads its table as local
+-- time, which would shift every SAML timestamp by the machine's offset.
+local function days_from_civil(year, month, day)
+    if month <= 2 then
+        year = year - 1
+    end
+    local era = math.floor(year / 400)
+    local year_of_era = year - era * 400
+    local day_of_year = math.floor((153 * ((month + 9) % 12) + 2) / 5) + day - 1
+    local day_of_era = year_of_era * 365 + math.floor(year_of_era / 4)
+        - math.floor(year_of_era / 100) + day_of_year
+    return era * 146097 + day_of_era - 719468
+end
+
 local function parse_iso8601_utc_time(str)
     -- NOTE: We accept only 'Z' for timezone.
-    local year_s, month_s, day_s, hour_s, min_s, sec_s = str:match('(%d%d%d%d)-(%d%d)-(%d%d)T(%d%d):(%d%d):(%d%d).*Z')
+    -- Anchored at both ends, so a year the four-digit field cannot hold is
+    -- refused rather than read from part way in: xs:dateTime allows a leading
+    -- minus for BCE, and an unanchored match starts after it and turns 9999 BCE
+    -- into 9999 CE. A fractional second is read and truncated towards the past.
+    local year_s, month_s, day_s, hour_s, min_s, sec_s =
+        str:match('^(%d%d%d%d)-(%d%d)-(%d%d)T(%d%d):(%d%d):(%d%d)%.?%d*Z$')
     if year_s == nil then
         return nil, 'invalid UTC time pattern unmatch'
     end
@@ -255,7 +283,147 @@ local function parse_iso8601_utc_time(str)
     if sec < 0 or 59 < sec then
         return nil, 'invalid sec in UTC time'
     end
-    return os.time{year=year, month=month, day=day, hour=hour, min=min, sec=sec}
+    return days_from_civil(year, month, day) * 86400 + hour * 3600 + min * 60 + sec
+end
+
+
+-- Values lifted out of the IdP's document end up in the error log, which is
+-- read a line at a time. XML folds a literal newline inside an attribute to a
+-- space, but a character reference survives that, and the Response wrapper is
+-- not covered by the signature, so its Destination is whatever the sender
+-- typed. Escape rather than trust any of it to stay on one line.
+-- Every value read out of a SAML message goes through here on its way to a log,
+-- whether or not a signature covers it and whichever message it came from. The
+-- rule is the value's origin, not its type: an attribute the schema constrains
+-- today is one schema revision away from carrying anything.
+local function loggable(value)
+    return (tostring(value):gsub("%c", function(c)
+        return string.format("\\x%02X", c:byte())
+    end))
+end
+
+
+-- A signature says the message came from the IdP. It does not say the assertion
+-- is still good, that it was issued for this SP, or that it may be presented
+-- here. Those live in the assertion's own Conditions and SubjectConfirmation,
+-- and are checked below.
+--
+-- A constraint the IdP left out is not invented: an IdP that sends no
+-- AudienceRestriction keeps working. One the IdP did send is enforced, which is
+-- what stops an assertion minted for another SP in the same federation.
+local DEFAULT_CLOCK_SKEW = 60
+
+local function time_bounds_ok(not_before, not_on_or_after, now, skew)
+    local opens, closes, err
+
+    if not_before then
+        opens, err = parse_iso8601_utc_time(not_before)
+        if not opens then
+            return false, "carries an unreadable NotBefore " .. not_before .. ": " .. err
+        end
+    end
+
+    if not_on_or_after then
+        closes, err = parse_iso8601_utc_time(not_on_or_after)
+        if not closes then
+            return false, "carries an unreadable NotOnOrAfter " .. not_on_or_after .. ": " .. err
+        end
+    end
+
+    -- A window that opens after it closes is empty on every clock, so the skew
+    -- allowance has no say in it: without this, each end on its own looks
+    -- acceptable and an inversion of up to twice the allowance passes. Strictly
+    -- later rather than not earlier, since a fractional second is truncated away
+    -- and two instants inside one second read as equal.
+    if opens and closes and opens > closes then
+        return false, "opens at " .. not_before .. " and closes at " .. not_on_or_after
+    end
+
+    if opens and now + skew < opens then
+        return false, "is not valid before " .. not_before
+    end
+
+    if closes and now - skew >= closes then
+        return false, "is not valid on or after " .. not_on_or_after
+    end
+
+    return true
+end
+
+
+local function audience_accepted(accepted, audiences)
+    for _, audience in ipairs(audiences) do
+        for _, expected in ipairs(accepted) do
+            if expected == audience then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+
+-- The assertion may be presented to whoever the Recipient names, for as long as
+-- the confirmation data allows. Several confirmations can be offered and any one
+-- of them being satisfiable is enough.
+local function confirmation_ok(confirmation, acs_url, now, skew)
+    -- Recipient is the only thing a confirmation says about where the assertion
+    -- may be presented, so it has to be there. An absent one, an empty
+    -- SubjectConfirmationData, and one carrying nothing but conditions that
+    -- happen to hold all say the same nothing, and any of them would otherwise
+    -- answer in place of a sibling that binds the assertion somewhere else.
+    if confirmation.recipient ~= acs_url then
+        return false
+    end
+    return (time_bounds_ok(confirmation.not_before, confirmation.not_on_or_after, now, skew))
+end
+
+
+-- Every top-level assertion the verified signature left in the document is one
+-- the readers draw identity from, so every one of them has to hold up.
+local function assertions_acceptable(opts, assertions, acs_url, now)
+    local skew = opts.clock_skew or DEFAULT_CLOCK_SKEW
+    local accepted = opts.sp_audiences or { opts.sp_issuer }
+
+    for _, assertion in ipairs(assertions) do
+        local where = "assertion " .. tostring(assertion.id) .. " "
+
+        -- SAML Core 2.5.1: a condition the SP cannot satisfy leaves the
+        -- assertion Indeterminate, which is not a licence to use it
+        if assertion.unknown_condition then
+            return false, where .. "carries a condition this SP cannot satisfy: " ..
+                assertion.unknown_condition
+        end
+
+        local ok, err = time_bounds_ok(assertion.not_before, assertion.not_on_or_after, now, skew)
+        if not ok then
+            return false, where .. err
+        end
+
+        -- each AudienceRestriction narrows the audience separately, so this SP
+        -- has to be named in all of them
+        for _, restriction in ipairs(assertion.audience_restrictions) do
+            if not audience_accepted(accepted, restriction) then
+                return false, where .. "is restricted to " .. table.concat(restriction, ", ")
+            end
+        end
+
+        local confirmations = assertion.subject_confirmations
+        if #confirmations > 0 then
+            local satisfiable = false
+            for _, confirmation in ipairs(confirmations) do
+                if confirmation_ok(confirmation, acs_url, now, skew) then
+                    satisfiable = true
+                    break
+                end
+            end
+            if not satisfiable then
+                return false, where .. "offers no subject confirmation this SP can satisfy"
+            end
+        end
+    end
+
+    return true
 end
 
 -- An Issuer is a string in the XML schema, so libxml2 hands back the element
@@ -345,13 +513,38 @@ local function login_callback(self, opts)
 
     local status_code = saml.doc_status_code(doc)
     if status_code ~= saml.STATUS_SUCCESS then
-        ngx.log(ngx.ERR, "IdP returned non-success status: ", status_code)
+        ngx.log(ngx.ERR, "IdP returned non-success status: ", loggable(status_code))
         ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
     end
 
     local state = args.RelayState
     if state ~= saml_state then
-        ngx.log(ngx.ERR, "state different: args.state=", state, ", state=", saml_state)
+        ngx.log(ngx.ERR, "state different: args.state=", loggable(state), ", state=", saml_state)
+        ngx.exit(ngx.HTTP_UNAUTHORIZED)
+    end
+
+    local acs_url = sp_acs_url(opts)
+
+    local destination, destination_err = saml.doc_destination(doc)
+    if destination_err then
+        ngx.log(ngx.ERR, "could not read the destination of the response from IdP: ",
+            destination_err)
+        ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
+    end
+    if destination and destination ~= acs_url then
+        ngx.log(ngx.ERR, "response from IdP is addressed to ", loggable(destination))
+        ngx.exit(ngx.HTTP_UNAUTHORIZED)
+    end
+
+    local assertions = saml.doc_assertions(doc)
+    if not assertions then
+        ngx.log(ngx.ERR, "could not read the assertions in response from IdP")
+        ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
+    end
+
+    local acceptable, reason = assertions_acceptable(opts, assertions, acs_url, ngx.time())
+    if not acceptable then
+        ngx.log(ngx.ERR, "response from IdP rejected: ", loggable(reason))
         ngx.exit(ngx.HTTP_UNAUTHORIZED)
     end
 
@@ -362,7 +555,7 @@ local function login_callback(self, opts)
 
     local allowed, unexpected = issuers_allowed(self.idp_issuers, saml.doc_issuers(doc))
     if not allowed then
-        ngx.log(ngx.ERR, "unexpected issuer in response from IdP: ", tostring(unexpected))
+        ngx.log(ngx.ERR, "unexpected issuer in response from IdP: ", loggable(unexpected))
         ngx.exit(ngx.HTTP_UNAUTHORIZED)
     end
 
@@ -377,11 +570,15 @@ local function login_callback(self, opts)
     local expires
     if session_expires then
         expires, err = parse_iso8601_utc_time(session_expires)
-        ngx.log(ngx.INFO, "login callback: session_expires=", os.date("%Y-%m-%d %T %z", expires))
         if err then
-            ngx.say(err)
+            -- ngx.say would commit the response, leaving ngx.exit unable to set
+            -- a status and the caller a 200 carrying this string
+            ngx.log(ngx.ERR, "unreadable SessionNotOnOrAfter ", loggable(session_expires),
+                " in response from IdP: ", err)
             ngx.exit(500)
         end
+        ngx.log(ngx.INFO, "login callback: session_expires=",
+            os.date("!%Y-%m-%d %TZ", expires))
     end
 
 
@@ -397,7 +594,7 @@ local function login_callback(self, opts)
     sess:set("request_uri", nil)
     sess:save()
 
-    ngx.log(ngx.INFO, "login finish: name_id=", name_id)
+    ngx.log(ngx.INFO, "login finish: name_id=", loggable(name_id))
 
     return ngx.redirect(request_uri)
 end
@@ -469,20 +666,20 @@ local function logout_callback(self, opts)
 
         local saved_issuer = sess:get("issuer")
         if issuer ~= saved_issuer then
-            ngx.log(ngx.WARN, "issuer different: issuer=", issuer,
+            ngx.log(ngx.WARN, "issuer different: issuer=", loggable(issuer),
                 ", data.issuer=", saved_issuer)
         end
 
         local saved_name_id = sess:get("name_id")
         if name_id ~= saved_name_id then
-            ngx.log(ngx.WARN, "name_id different: name_id=", name_id,
+            ngx.log(ngx.WARN, "name_id different: name_id=", loggable(name_id),
                 ", data.name_id=", saved_name_id)
         end
 
         local saved_session_index = sess:get("session_index")
         if session_index ~= saved_session_index then
             ngx.log(ngx.WARN, "session_index different: session_index=",
-                session_index, ", data.session_index=", saved_session_index)
+                loggable(session_index), ", data.session_index=", saved_session_index)
         end
 
         sess:destroy()
@@ -502,7 +699,7 @@ local function logout_callback(self, opts)
     else
         local status_code = saml.doc_status_code(doc)
         if status_code ~= saml.STATUS_SUCCESS then
-            ngx.log(ngx.ERR, "IdP returned non-success status: ", status_code)
+            ngx.log(ngx.ERR, "IdP returned non-success status: ", loggable(status_code))
             ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
         end
 

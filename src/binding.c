@@ -44,10 +44,22 @@ static char* ERRORS[] = {
   "invalid signature algorithm",
   "signature does not match",
   "signature does not cover the message",
+  "document carries a document type declaration",
 };
 
 char* saml_binding_error_msg(saml_binding_status_t status) {
   return ERRORS[status - SAML_ZLIB_ERROR];
+}
+
+
+// Canonicalisation drops the document type declaration before anything is
+// hashed, so no signature covers one and none is disturbed by one being added.
+// Its ATTLIST defaults are still answered to every reader that asks a node for
+// an attribute, without ever being written onto the node, so a prologue nobody
+// signed supplies attributes the signed content never carried. SAML has no use
+// for a DTD, so a message carrying one is refused rather than read.
+static int doc_has_dtd(xmlDoc* doc) {
+  return doc->intSubset != NULL || doc->extSubset != NULL;
 }
 
 static void redirect_concat_args(char* saml_type, char* content, char* sig_alg, char* relay_state, str_t* query) {
@@ -177,6 +189,10 @@ saml_binding_status_t saml_binding_redirect_parse(char* content, char* sig_alg, 
     return SAML_INVALID_XML;
   }
 
+  if (doc_has_dtd(*doc)) {
+    return SAML_HAS_DTD;
+  }
+
   if (!saml_doc_validate(*doc)) {
     return SAML_INVALID_DOC;
   }
@@ -289,6 +305,10 @@ saml_binding_status_t saml_binding_post_parse(char* content, xmlDoc** doc) {
   *doc = xmlReadMemory((char*)decoded, decoded_len, "tmp.xml", NULL, 0);
   if (*doc == NULL) {
     return SAML_INVALID_XML;
+  }
+
+  if (doc_has_dtd(*doc)) {
+    return SAML_HAS_DTD;
   }
 
   if (!saml_doc_validate(*doc)) {

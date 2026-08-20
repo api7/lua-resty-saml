@@ -25,20 +25,143 @@ static xmlXPathObject* eval_xpath(xmlDoc* doc, xmlXPathCompExpr* xpath) {
 }
 
 
+static int is_saml_assertion(xmlNode* node) {
+  return node->type == XML_ELEMENT_NODE &&
+    xmlStrEqual(node->name, (const xmlChar*)"Assertion") == 1 &&
+    node->ns != NULL &&
+    xmlStrEqual(node->ns->href, (const xmlChar*)SAML_XMLNS_ASSERTION) == 1;
+}
+
+
+// The direct child of node named name in namespace ns, or NULL. Only direct
+// children: an element the message itself declares is not the same as one a
+// document-wide search happens to reach first.
+static xmlNode* ns_child(xmlNode* node, const xmlChar* name, const char* ns) {
+  for (xmlNode* child = node->children; child != NULL; child = child->next) {
+    if (child->type == XML_ELEMENT_NODE &&
+        xmlStrEqual(child->name, name) == 1 &&
+        child->ns != NULL &&
+        xmlStrEqual(child->ns->href, (const xmlChar*)ns) == 1) {
+      return child;
+    }
+  }
+  return NULL;
+}
+
+
+// The text of node's own Issuer child, or NULL. Issuer is in the assertion
+// namespace wherever it appears, so a look-alike in another one is not it.
+static xmlChar* issuer_of(xmlDoc* doc, xmlNode* node) {
+  xmlNode* issuer = ns_child(node, (const xmlChar*)"Issuer", SAML_XMLNS_ASSERTION);
+  return issuer == NULL ? NULL : xmlNodeListGetString(doc, issuer->children, 1);
+}
+
+
+// A Response's issuer is read from its assertion, the element the identity
+// itself comes from. The Response's own Issuer sits outside an assertion-level
+// signature and can be rewritten without breaking it, while every top-level
+// assertion still in the document is one the signature covers. A message that
+// carries no assertion is only accepted signed whole, so its own Issuer is the
+// one to read.
+//
+// Like the other accessors, this expects a document one of the two verify paths
+// let through, and each path keeps that property its own way: the POST binding
+// by pruning what the signature leaves out, the redirect binding by signing the
+// encoded message whole and never pruning at all. Narrowing either one is what
+// would cost this its footing.
 xmlChar* saml_doc_issuer(xmlDoc* doc) {
-  xmlNode* node = xmlDocGetRootElement(doc);
-  if (node == NULL) {
+  xmlNode* root = xmlDocGetRootElement(doc);
+  if (root == NULL) {
     return NULL;
   }
 
-  node = node->children;
-  while (node != NULL) {
-    if (xmlStrEqual(node->name, (xmlChar*)"Issuer") == 1) {
-      return xmlNodeListGetString(doc, node->children, 1);
+  if (xmlStrEqual(root->name, (const xmlChar*)"Response") == 1) {
+    for (xmlNode* child = root->children; child != NULL; child = child->next) {
+      if (is_saml_assertion(child)) {
+        return issuer_of(doc, child);
+      }
     }
-    node = node->next;
+    return NULL;
   }
-  return NULL;
+
+  return issuer_of(doc, root);
+}
+
+
+void saml_issuers_free(xmlChar** issuers, size_t issuers_len) {
+  for (size_t i = 0; i < issuers_len; i++) {
+    xmlFree(issuers[i]);
+  }
+  free(issuers);
+}
+
+
+// Every issuer the message attributes content to: one per top-level assertion
+// of a Response, or its own for a message that carries none and is therefore
+// only accepted signed whole. A caller matching
+// the issuer against a policy has to weigh all of them, because doc_attrs reads
+// every top-level assertion and doc_name_id the first one carrying a subject.
+// An assertion with no Issuer is invalid SAML; it is listed as an empty string,
+// which no configured issuer matches.
+int saml_doc_issuers(xmlDoc* doc, xmlChar*** issuers, size_t* issuers_len) {
+  *issuers = NULL;
+  *issuers_len = 0;
+
+  xmlNode* root = xmlDocGetRootElement(doc);
+  if (root == NULL) {
+    return 0;
+  }
+
+  if (xmlStrEqual(root->name, (const xmlChar*)"Response") != 1) {
+    xmlChar* issuer = issuer_of(doc, root);
+    if (issuer == NULL) {
+      return 0;
+    }
+    *issuers = malloc(sizeof(xmlChar*));
+    if (*issuers == NULL) {
+      xmlFree(issuer);
+      return -1;
+    }
+    (*issuers)[0] = issuer;
+    *issuers_len = 1;
+    return 0;
+  }
+
+  size_t count = 0;
+  for (xmlNode* child = root->children; child != NULL; child = child->next) {
+    if (is_saml_assertion(child)) {
+      count++;
+    }
+  }
+  if (count == 0) {
+    return 0;
+  }
+
+  *issuers = malloc(count * sizeof(xmlChar*));
+  if (*issuers == NULL) {
+    return -1;
+  }
+
+  size_t i = 0;
+  for (xmlNode* child = root->children; child != NULL && i < count; child = child->next) {
+    if (!is_saml_assertion(child)) {
+      continue;
+    }
+    xmlChar* issuer = issuer_of(doc, child);
+    if (issuer == NULL) {
+      issuer = xmlStrdup((const xmlChar*)"");
+    }
+    if (issuer == NULL) {
+      // a short list would read as fewer assertions to vouch for than the
+      // document holds, so report the failure rather than an incomplete answer
+      saml_issuers_free(*issuers, i);
+      *issuers = NULL;
+      return -1;
+    }
+    (*issuers)[i++] = issuer;
+  }
+  *issuers_len = i;
+  return 0;
 }
 
 
@@ -49,7 +172,8 @@ xmlChar* saml_doc_name_id(xmlDoc* doc) {
   }
 
   if (xmlStrEqual(node->name, (xmlChar*)"LogoutRequest") == 1) {
-    node = xmlSecFindNode(node, (xmlChar*)"NameID", (xmlChar*)SAML_XMLNS_ASSERTION);
+    // the subject the request names, which the schema puts directly under it
+    node = ns_child(node, (const xmlChar*)"NameID", SAML_XMLNS_ASSERTION);
     if (node == NULL) {
       return NULL;
     }
@@ -76,20 +200,6 @@ xmlChar* saml_doc_name_id(xmlDoc* doc) {
 }
 
 
-// The direct child of node named name in the protocol namespace, or NULL.
-static xmlNode* protocol_child(xmlNode* node, const xmlChar* name) {
-  for (xmlNode* child = node->children; child != NULL; child = child->next) {
-    if (child->type == XML_ELEMENT_NODE &&
-        xmlStrEqual(child->name, name) == 1 &&
-        child->ns != NULL &&
-        xmlStrEqual(child->ns->href, (const xmlChar*)SAML_XMLNS_PROTOCOL) == 1) {
-      return child;
-    }
-  }
-  return NULL;
-}
-
-
 xmlChar* saml_doc_status_code(xmlDoc* doc) {
   // Read the top-level message's status directly, not a document-wide match:
   // a nested Response (for example inside saml:Advice) can precede the root
@@ -98,11 +208,11 @@ xmlChar* saml_doc_status_code(xmlDoc* doc) {
   if (root == NULL) {
     return NULL;
   }
-  xmlNode* status = protocol_child(root, (const xmlChar*)"Status");
+  xmlNode* status = ns_child(root, (const xmlChar*)"Status", SAML_XMLNS_PROTOCOL);
   if (status == NULL) {
     return NULL;
   }
-  xmlNode* code = protocol_child(status, (const xmlChar*)"StatusCode");
+  xmlNode* code = ns_child(status, (const xmlChar*)"StatusCode", SAML_XMLNS_PROTOCOL);
   if (code == NULL) {
     return NULL;
   }
@@ -144,7 +254,7 @@ xmlChar* saml_doc_session_index(xmlDoc* doc) {
   }
 
   if (xmlStrEqual(node->name, (xmlChar*)"LogoutRequest") == 1) {
-    node = xmlSecFindNode(node, (xmlChar*)"SessionIndex", (xmlChar*)SAML_XMLNS_PROTOCOL);
+    node = ns_child(node, (const xmlChar*)"SessionIndex", SAML_XMLNS_PROTOCOL);
     if (node == NULL) {
       return NULL;
     }
@@ -241,10 +351,6 @@ void saml_attrs_free(saml_attr_t* attrs, size_t attrs_len) {
   }
   free(attrs);
 }
-
-
-// Defined in sig.c, which saml.c includes after this file.
-static int is_saml_assertion(xmlNode* node);
 
 
 // An absent attribute and one whose value could not be copied both come back

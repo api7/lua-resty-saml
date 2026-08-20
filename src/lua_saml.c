@@ -386,7 +386,7 @@ static int doc_name_id(lua_State* L) {
 
 
 /***
-Get the text of the issuer node
+Get the issuer of the assertion a Response carries, or of the message itself
 @function doc_issuer
 @tparam xmlDoc* doc
 @treturn ?string issuer
@@ -403,6 +403,35 @@ static int doc_issuer(lua_State* L) {
     lua_pushstring(L, (char*)issuer);
     xmlFree(issuer);
   }
+  return 1;
+}
+
+
+/***
+Get the issuer of every assertion whose content the document's readers consume
+@function doc_issuers
+@tparam xmlDoc* doc
+@treturn table issuers
+*/
+static int doc_issuers(lua_State* L) {
+  lua_settop(L, 1);
+  xmlDoc* doc = doc_check(L, 1);
+  lua_pop(L, 1);
+
+  xmlChar** issuers;
+  size_t issuers_len;
+  if (saml_doc_issuers(doc, &issuers, &issuers_len) < 0) {
+    lua_pushnil(L);
+    return 1;
+  }
+
+  lua_newtable(L);
+  for (size_t i = 0; i < issuers_len; i++) {
+    lua_pushinteger(L, i + 1);
+    lua_pushstring(L, issuers[i] == NULL ? "" : (char*)issuers[i]);
+    lua_settable(L, -3);
+  }
+  saml_issuers_free(issuers, issuers_len);
   return 1;
 }
 
@@ -1291,6 +1320,7 @@ static const struct luaL_Reg saml_funcs[] = {
   {"doc_root_name", doc_root_name},
   {"doc_id", doc_id},
   {"doc_issuer", doc_issuer},
+  {"doc_issuers", doc_issuers},
   {"doc_name_id", doc_name_id},
   {"doc_status_code", doc_status_code},
   {"doc_session_index", doc_session_index},

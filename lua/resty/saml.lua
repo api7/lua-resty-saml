@@ -250,7 +250,12 @@ end
 
 local function parse_iso8601_utc_time(str)
     -- NOTE: We accept only 'Z' for timezone.
-    local year_s, month_s, day_s, hour_s, min_s, sec_s = str:match('(%d%d%d%d)-(%d%d)-(%d%d)T(%d%d):(%d%d):(%d%d).*Z')
+    -- Anchored at both ends, so a year the four-digit field cannot hold is
+    -- refused rather than read from part way in: xs:dateTime allows a leading
+    -- minus for BCE, and an unanchored match starts after it and turns 9999 BCE
+    -- into 9999 CE. A fractional second is read and truncated towards the past.
+    local year_s, month_s, day_s, hour_s, min_s, sec_s =
+        str:match('^(%d%d%d%d)-(%d%d)-(%d%d)T(%d%d):(%d%d):(%d%d)%.?%d*Z$')
     if year_s == nil then
         return nil, 'invalid UTC time pattern unmatch'
     end

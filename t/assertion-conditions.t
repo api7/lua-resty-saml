@@ -724,3 +724,32 @@ env TZ=XXX-14;
 401 nil
 --- error_log
 addressed to https://x\x0AWARNING-forged-entry
+
+
+
+=== TEST 23: a year the parser cannot hold is refused, not read from part way in
+--- config
+    location /t {
+        content_by_lua_block {
+            -- 9999 BCE, which the schema accepts: unanchored, the match starts
+            -- after the minus and reads a far-future 9999 CE out of an
+            -- already-expired bound
+            ngx.say(login_with("plain", saml_response({
+                conditions = conditions({ not_on_or_after = "-9999-01-01T00:00:00Z" }),
+            })))
+            -- five digits, where the match can start one character in
+            ngx.say(login_with("plain", saml_response({
+                conditions = conditions({ not_on_or_after = "20260-01-01T00:00:00Z" }),
+            })))
+            -- a fractional second is still read
+            ngx.say(login_with("plain", saml_response({
+                conditions = conditions({ not_on_or_after = (at(600):gsub("Z", ".500Z")) }),
+            })))
+        }
+    }
+--- response_body
+401 nil
+401 nil
+302 /
+--- error_log
+carries an unreadable NotOnOrAfter -9999-01-01T00:00:00Z

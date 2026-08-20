@@ -43,6 +43,7 @@ static char* ERRORS[] = {
   "document does not validate against schema",
   "invalid signature algorithm",
   "signature does not match",
+  "signature does not cover the message",
 };
 
 char* saml_binding_error_msg(saml_binding_status_t status) {
@@ -303,7 +304,9 @@ saml_binding_status_t saml_binding_post_verify(xmlSecKeysMngr* mngr, xmlDoc* doc
   if (res < 0) {
     return SAML_XMLSEC_ERROR;
   } else if (res == 0) {
-    confine_identity_to_signature(doc);
+    if (!bind_identity_to_signature(doc)) {
+      return SAML_UNSIGNED_IDENTITY;
+    }
     return SAML_OK;
   } else {
     return SAML_INVALID_SIGNATURE;

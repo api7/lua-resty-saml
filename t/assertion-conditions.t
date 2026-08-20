@@ -614,14 +614,23 @@ env TZ=XXX-14;
             ngx.say(login_with("acs", elsewhere, forged))
             -- and headers that disagree cannot refuse an assertion that names it
             ngx.say(login_with("acs", here, forged))
+
+            -- the same value settles Destination, which is read on a response
+            -- carrying no confirmation to weigh
+            local addressed = saml_response({}, "https://sp.example.com/acs")
+            ngx.say(login_with("plain", addressed, forged))
+            ngx.say(login_with("acs", addressed, forged))
         }
     }
 --- response_body
 302 /
 401 nil
 302 /
---- error_log
-offers no subject confirmation this SP can satisfy
+302 /
+401 nil
+--- error_log eval
+[qr/offers no subject confirmation this SP can satisfy/,
+qr{addressed to https://sp\.example\.com/acs}]
 
 
 
@@ -645,20 +654,35 @@ offers no subject confirmation this SP can satisfy
 --- config
     location /t {
         content_by_lua_block {
-            -- the only confirmation carries no SubjectConfirmationData, so the
-            -- assertion names neither an endpoint nor a window
+            local elsewhere = confirmation({ recipient = "https://evil.example.com/acs" })
+
+            -- no SubjectConfirmationData at all
             ngx.say(login_with("plain", saml_response({
                 confirmations = confirmation({ data = false }),
             })))
-            -- and an empty one cannot answer for a sibling that binds the
-            -- assertion somewhere else
+            -- the element written out with nothing in it, which the schema
+            -- allows since every attribute on it is optional
             ngx.say(login_with("plain", saml_response({
-                confirmations = confirmation({ recipient = "https://evil.example.com/acs" }) ..
-                    confirmation({ data = false }),
+                confirmations = confirmation({}),
+            })))
+            -- and neither spelling may answer in place of a sibling that binds
+            -- the assertion somewhere else
+            ngx.say(login_with("plain", saml_response({
+                confirmations = elsewhere .. confirmation({ data = false }),
+            })))
+            ngx.say(login_with("plain", saml_response({
+                confirmations = elsewhere .. confirmation({}),
+            })))
+            -- nor may one carrying only a condition that happens to hold
+            ngx.say(login_with("plain", saml_response({
+                confirmations = elsewhere .. confirmation({ not_before = at(-600) }),
             })))
         }
     }
 --- response_body
+401 nil
+401 nil
+401 nil
 401 nil
 401 nil
 --- error_log

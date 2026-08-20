@@ -599,7 +599,6 @@ static void push_subject_confirmations(lua_State* L, saml_assertion_t* a) {
     lua_pushinteger(L, i + 1);
     lua_newtable(L);
     set_str_field(L, "method", confirmation->method);
-    set_bool_field(L, "has_data", confirmation->has_data);
     set_str_field(L, "recipient", confirmation->recipient);
     set_str_field(L, "not_before", confirmation->not_before);
     set_str_field(L, "not_on_or_after", confirmation->not_on_or_after);

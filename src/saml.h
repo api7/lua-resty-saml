@@ -49,7 +49,6 @@ typedef struct {
 
 typedef struct {
   xmlChar* method;
-  int has_data;
   xmlChar* recipient;
   xmlChar* not_before;
   xmlChar* not_on_or_after;

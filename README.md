@@ -79,7 +79,7 @@ local saml = resty_saml.new(opts)
 | `logout_redirect_uri`      | string       | None      | redirect uri after sucessful logout.       |
 | `sp_cert`      | string       | None      | SP Certificate, used to sign the saml request.       |
 | `sp_private_key`      | string       | None      | SP private key.       |
-| `sp_acs_url`      | string       | built from the request       | Absolute URL of this SP's assertion consumer service. It is announced to the IdP and is what `Destination` and `SubjectConfirmationData/@Recipient` have to name. Unset assembles it from the request's scheme and host, which needs a proxy that sets `X-Forwarded-Proto` and `X-Forwarded-Host` correctly.       |
+| `sp_acs_url`      | string       | built from the request       | Absolute URL of this SP's assertion consumer service. It is announced to the IdP, every `SubjectConfirmationData/@Recipient` has to name it, and a `Destination` has to name it on a response carrying one. Unset, it is assembled from the request's scheme and host, which is only as trustworthy as whatever sits in front: set it wherever the ingress does not normalise `Forwarded` and `X-Forwarded-*`, or terminates TLS without setting `X-Forwarded-Proto`.       |
 | `sp_audiences`      | array of strings       | `{ sp_issuer }`      | Audiences this SP answers to. An assertion carrying an `AudienceRestriction` has to name one of them; an assertion carrying none is unrestricted.       |
 | `clock_skew`      | number       | `60`      | Seconds of clock difference tolerated against the IdP when weighing `NotBefore` and `NotOnOrAfter`.       |
 

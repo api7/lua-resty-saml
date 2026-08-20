@@ -345,14 +345,12 @@ end
 -- the confirmation data allows. Several confirmations can be offered and any one
 -- of them being satisfiable is enough.
 local function confirmation_ok(confirmation, acs_url, now, skew)
-    -- a confirmation carrying no SubjectConfirmationData states no condition,
-    -- and one that states nothing confirms nothing. Counting it as satisfied
-    -- would let it answer for a sibling that does bind the assertion, which
-    -- disarms every check below with one empty element.
-    if not confirmation.has_data then
-        return false
-    end
-    if confirmation.recipient and confirmation.recipient ~= acs_url then
+    -- Recipient is the only thing a confirmation says about where the assertion
+    -- may be presented, so it has to be there. An absent one, an empty
+    -- SubjectConfirmationData, and one carrying nothing but conditions that
+    -- happen to hold all say the same nothing, and any of them would otherwise
+    -- answer in place of a sibling that binds the assertion somewhere else.
+    if confirmation.recipient ~= acs_url then
         return false
     end
     return (time_bounds_ok(confirmation.not_before, confirmation.not_on_or_after, now, skew))
@@ -434,13 +432,13 @@ local function login_callback(self, opts)
 
     local status_code = saml.doc_status_code(doc)
     if status_code ~= saml.STATUS_SUCCESS then
-        ngx.log(ngx.ERR, "IdP returned non-success status: ", status_code)
+        ngx.log(ngx.ERR, "IdP returned non-success status: ", loggable(status_code))
         ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
     end
 
     local state = args.RelayState
     if state ~= saml_state then
-        ngx.log(ngx.ERR, "state different: args.state=", state, ", state=", saml_state)
+        ngx.log(ngx.ERR, "state different: args.state=", loggable(state), ", state=", saml_state)
         ngx.exit(ngx.HTTP_UNAUTHORIZED)
     end
 
@@ -501,7 +499,7 @@ local function login_callback(self, opts)
     sess:set("request_uri", nil)
     sess:save()
 
-    ngx.log(ngx.INFO, "login finish: name_id=", name_id)
+    ngx.log(ngx.INFO, "login finish: name_id=", loggable(name_id))
 
     return ngx.redirect(request_uri)
 end

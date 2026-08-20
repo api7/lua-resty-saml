@@ -753,3 +753,37 @@ addressed to https://x\x0AWARNING-forged-entry
 302 /
 --- error_log
 carries an unreadable NotOnOrAfter -9999-01-01T00:00:00Z
+
+
+
+=== TEST 24: an unreadable session expiry is an error, not a 200 carrying one
+--- config
+    location /t {
+        content_by_lua_block {
+            local httpc = require("resty.http").new()
+            local base = "http://127.0.0.1:1984"
+
+            local res = assert(httpc:request_uri(base .. "/", { headers = { ["X-Test-SP"] = "plain" } }))
+            local cookie = res.headers["Set-Cookie"]
+            if type(cookie) == "table" then cookie = cookie[1] end
+            local state = res.headers["Location"]:match("RelayState=([^&]+)")
+
+            -- schema-valid xs:dateTime this parser will not read: a numeric
+            -- offset where SAML requires Z
+            local xml = saml_response({ session_expires = "2030-01-01T00:00:00+00:00" })
+            res = assert(httpc:request_uri(base .. "/acs", {
+                method = "POST",
+                body = "SAMLResponse=" .. ngx.escape_uri(saml.base64_encode(xml)) ..
+                    "&RelayState=" .. state,
+                headers = callback_headers("plain", cookie),
+            }))
+            -- the status the branch always meant to send, and the parse
+            -- error kept out of the body it used to be written into
+            ngx.say(res.status, " leaks=",
+                tostring(((res.body or ""):find("UTC time", 1, true)) ~= nil))
+        }
+    }
+--- response_body
+500 leaks=false
+--- error_log
+unreadable SessionNotOnOrAfter 2030-01-01T00:00:00+00:00

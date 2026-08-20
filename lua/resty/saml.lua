@@ -292,6 +292,10 @@ end
 -- space, but a character reference survives that, and the Response wrapper is
 -- not covered by the signature, so its Destination is whatever the sender
 -- typed. Escape rather than trust any of it to stay on one line.
+-- Every value read out of a SAML message goes through here on its way to a log,
+-- whether or not a signature covers it and whichever message it came from. The
+-- rule is the value's origin, not its type: an attribute the schema constrains
+-- today is one schema revision away from carrying anything.
 local function loggable(value)
     return (tostring(value):gsub("%c", function(c)
         return string.format("\\x%02X", c:byte())
@@ -449,7 +453,12 @@ local function login_callback(self, opts)
 
     local acs_url = sp_acs_url(opts)
 
-    local destination = saml.doc_destination(doc)
+    local destination, destination_err = saml.doc_destination(doc)
+    if destination_err then
+        ngx.log(ngx.ERR, "could not read the destination of the response from IdP: ",
+            destination_err)
+        ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
+    end
     if destination and destination ~= acs_url then
         ngx.log(ngx.ERR, "response from IdP is addressed to ", loggable(destination))
         ngx.exit(ngx.HTTP_UNAUTHORIZED)
@@ -484,7 +493,10 @@ local function login_callback(self, opts)
     if session_expires then
         expires, err = parse_iso8601_utc_time(session_expires)
         if err then
-            ngx.say(err)
+            -- ngx.say would commit the response, leaving ngx.exit unable to set
+            -- a status and the caller a 200 carrying this string
+            ngx.log(ngx.ERR, "unreadable SessionNotOnOrAfter ", loggable(session_expires),
+                " in response from IdP: ", err)
             ngx.exit(500)
         end
         ngx.log(ngx.INFO, "login callback: session_expires=",
@@ -576,20 +588,20 @@ local function logout_callback(self, opts)
 
         local saved_issuer = sess:get("issuer")
         if issuer ~= saved_issuer then
-            ngx.log(ngx.WARN, "issuer different: issuer=", issuer,
+            ngx.log(ngx.WARN, "issuer different: issuer=", loggable(issuer),
                 ", data.issuer=", saved_issuer)
         end
 
         local saved_name_id = sess:get("name_id")
         if name_id ~= saved_name_id then
-            ngx.log(ngx.WARN, "name_id different: name_id=", name_id,
+            ngx.log(ngx.WARN, "name_id different: name_id=", loggable(name_id),
                 ", data.name_id=", saved_name_id)
         end
 
         local saved_session_index = sess:get("session_index")
         if session_index ~= saved_session_index then
             ngx.log(ngx.WARN, "session_index different: session_index=",
-                session_index, ", data.session_index=", saved_session_index)
+                loggable(session_index), ", data.session_index=", saved_session_index)
         end
 
         sess:destroy()
@@ -609,7 +621,7 @@ local function logout_callback(self, opts)
     else
         local status_code = saml.doc_status_code(doc)
         if status_code ~= saml.STATUS_SUCCESS then
-            ngx.log(ngx.ERR, "IdP returned non-success status: ", status_code)
+            ngx.log(ngx.ERR, "IdP returned non-success status: ", loggable(status_code))
             ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
         end
 

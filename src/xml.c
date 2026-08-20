@@ -247,6 +247,19 @@ void saml_attrs_free(saml_attr_t* attrs, size_t attrs_len) {
 static int is_saml_assertion(xmlNode* node);
 
 
+// An absent attribute and one whose value could not be copied both come back
+// NULL from xmlGetNoNsProp, and every caller here reads NULL as "the IdP said
+// nothing". For a bound or an endpoint that is a constraint quietly dropped, so
+// tell the two apart and let the read fail rather than the check.
+static int read_attr(xmlNode* node, const char* name, xmlChar** out) {
+  *out = xmlGetNoNsProp(node, (const xmlChar*)name);
+  if (*out == NULL && xmlHasNsProp(node, (const xmlChar*)name, NULL) != NULL) {
+    return -1;
+  }
+  return 0;
+}
+
+
 // A direct child element of node named name in the assertion namespace.
 static int is_assertion_el(xmlNode* node, const char* name) {
   return node->type == XML_ELEMENT_NODE &&
@@ -354,29 +367,37 @@ static int read_subject_confirmations(xmlNode* subject, saml_assertion_t* a) {
     }
 
     saml_subject_confirmation_t* confirmation = a->confirmations + i++;
-    confirmation->method = xmlGetNoNsProp(node, (const xmlChar*)"Method");
+    if (read_attr(node, "Method", &confirmation->method) < 0) {
+      return -1;
+    }
 
     xmlNode* data = assertion_child(node, "SubjectConfirmationData");
     if (data == NULL) {
       continue;
     }
-    confirmation->recipient = xmlGetNoNsProp(data, (const xmlChar*)"Recipient");
-    confirmation->not_before = xmlGetNoNsProp(data, (const xmlChar*)"NotBefore");
-    confirmation->not_on_or_after = xmlGetNoNsProp(data, (const xmlChar*)"NotOnOrAfter");
-    confirmation->in_response_to = xmlGetNoNsProp(data, (const xmlChar*)"InResponseTo");
+    if (read_attr(data, "Recipient", &confirmation->recipient) < 0 ||
+        read_attr(data, "NotBefore", &confirmation->not_before) < 0 ||
+        read_attr(data, "NotOnOrAfter", &confirmation->not_on_or_after) < 0 ||
+        read_attr(data, "InResponseTo", &confirmation->in_response_to) < 0) {
+      return -1;
+    }
   }
   return 0;
 }
 
 
 static int read_assertion(xmlDoc* doc, xmlNode* node, saml_assertion_t* a) {
-  a->id = xmlGetNoNsProp(node, (const xmlChar*)"ID");
+  if (read_attr(node, "ID", &a->id) < 0) {
+    return -1;
+  }
 
   xmlNode* conditions = assertion_child(node, "Conditions");
   if (conditions != NULL) {
     a->has_conditions = 1;
-    a->not_before = xmlGetNoNsProp(conditions, (const xmlChar*)"NotBefore");
-    a->not_on_or_after = xmlGetNoNsProp(conditions, (const xmlChar*)"NotOnOrAfter");
+    if (read_attr(conditions, "NotBefore", &a->not_before) < 0 ||
+        read_attr(conditions, "NotOnOrAfter", &a->not_on_or_after) < 0) {
+      return -1;
+    }
 
     for (xmlNode* child = conditions->children; child != NULL; child = child->next) {
       if (child->type == XML_ELEMENT_NODE && !is_known_condition(child)) {
@@ -447,6 +468,20 @@ int saml_doc_assertions(xmlDoc* doc, saml_assertion_t** assertions, size_t* asse
   *assertions = list;
   *assertions_len = count;
   return 0;
+}
+
+
+// The Destination of the root message, through an out parameter so that a value
+// which could not be read is distinguishable from one that is absent. The caller
+// skips the check on absent, which is the wrong answer for the other.
+int saml_doc_destination(xmlDoc* doc, xmlChar** destination) {
+  *destination = NULL;
+
+  xmlNode* root = xmlDocGetRootElement(doc);
+  if (root == NULL) {
+    return 0;
+  }
+  return read_attr(root, "Destination", destination);
 }
 
 

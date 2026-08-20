@@ -524,26 +524,30 @@ Get the Destination attribute of the root message
 @function doc_destination
 @tparam xmlDoc* doc
 @treturn ?string destination
+@treturn ?string error
 */
 static int doc_destination(lua_State* L) {
   lua_settop(L, 1);
   xmlDoc* doc = doc_check(L, 1);
   lua_pop(L, 1);
 
-  xmlNode* root = xmlDocGetRootElement(doc);
-  if (root == NULL) {
+  // nil for an absent Destination and nil for one that could not be read would
+  // be the same answer to the caller, and it skips the check on the first
+  xmlChar* destination;
+  if (saml_doc_destination(doc, &destination) < 0) {
     lua_pushnil(L);
-    return 1;
+    lua_pushstring(L, "could not read Destination");
+    return 2;
   }
 
-  xmlChar* destination = xmlGetNoNsProp(root, (const xmlChar*)"Destination");
   if (destination == NULL) {
     lua_pushnil(L);
   } else {
     lua_pushstring(L, (char*)destination);
     xmlFree(destination);
   }
-  return 1;
+  lua_pushnil(L);
+  return 2;
 }
 
 

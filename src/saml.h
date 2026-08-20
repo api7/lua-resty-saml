@@ -110,6 +110,7 @@ xmlChar* saml_doc_session_expires(xmlDoc* doc);
 int saml_doc_attrs(xmlDoc* doc, saml_attr_t** attrs, size_t* attrs_len);
 void saml_attrs_free(saml_attr_t* attrs, size_t attrs_len);
 int saml_doc_assertions(xmlDoc* doc, saml_assertion_t** assertions, size_t* assertions_len);
+int saml_doc_destination(xmlDoc* doc, xmlChar** destination);
 void saml_assertions_free(saml_assertion_t* assertions, size_t assertions_len);
 
 xmlSecTransformCtx* saml_sign_binary(xmlSecKey* key, xmlSecTransformId transform_id, unsigned char* data, size_t data_len);

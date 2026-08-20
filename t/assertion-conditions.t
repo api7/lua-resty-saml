@@ -787,3 +787,64 @@ carries an unreadable NotOnOrAfter -9999-01-01T00:00:00Z
 500 leaks=false
 --- error_log
 unreadable SessionNotOnOrAfter 2030-01-01T00:00:00+00:00
+
+
+
+=== TEST 25: a window that opens after it closes is empty on every clock
+--- config
+    location /t {
+        content_by_lua_block {
+            -- inverted by less than twice the skew allowance, so each end taken
+            -- on its own still looks acceptable
+            ngx.say(login_with("plain", saml_response({
+                conditions = conditions({ not_before = at(30), not_on_or_after = at(-30) }),
+            })))
+            -- the same shape on a subject confirmation, which shares the check
+            ngx.say(login_with("plain", saml_response({
+                confirmations = confirmation({ recipient = ACS,
+                    not_before = at(30), not_on_or_after = at(-30) }),
+            })))
+            -- both ends inside one second still reads as open, since the
+            -- fractional part is truncated away before they are compared
+            ngx.say(login_with("plain", saml_response({
+                conditions = conditions({ not_before = at(0), not_on_or_after = at(0) }),
+            })))
+        }
+    }
+--- response_body
+401 nil
+401 nil
+302 /
+--- error_log eval
+[qr/opens at .* and closes at /,
+qr/offers no subject confirmation this SP can satisfy/]
+
+
+
+=== TEST 26: a document type declaration is refused, whatever it declares
+--- config
+    location /t {
+        content_by_lua_block {
+            -- an ATTLIST default answers every reader that asks the node for an
+            -- attribute, without ever being written onto the node, and
+            -- canonicalisation drops the prologue before anything is hashed. So
+            -- this invents a Recipient inside signed content while leaving every
+            -- signature intact, whichever scope it covers
+            local doctype = '<!DOCTYPE samlp:Response [<!ATTLIST saml:SubjectConfirmationData ' ..
+                'Recipient CDATA "http://127.0.0.1:1984/acs">]>'
+            local body = assertion({ confirmations = confirmation({}) })
+
+            ngx.say(login_with("plain", doctype .. response(sign_doc(body))))
+            ngx.say(login_with("plain", doctype .. sign_doc(response(body))))
+            -- and the same documents without the prologue, which carry no
+            -- Recipient of their own
+            ngx.say(login_with("plain", response(sign_doc(body))))
+        }
+    }
+--- response_body
+400 nil
+400 nil
+401 nil
+--- error_log eval
+[qr/parse post from IdP: document carries a document type declaration/,
+qr/offers no subject confirmation this SP can satisfy/]

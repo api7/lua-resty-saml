@@ -314,24 +314,37 @@ end
 local DEFAULT_CLOCK_SKEW = 60
 
 local function time_bounds_ok(not_before, not_on_or_after, now, skew)
+    local opens, closes, err
+
     if not_before then
-        local at, err = parse_iso8601_utc_time(not_before)
-        if not at then
+        opens, err = parse_iso8601_utc_time(not_before)
+        if not opens then
             return false, "carries an unreadable NotBefore " .. not_before .. ": " .. err
-        end
-        if now + skew < at then
-            return false, "is not valid before " .. not_before
         end
     end
 
     if not_on_or_after then
-        local at, err = parse_iso8601_utc_time(not_on_or_after)
-        if not at then
+        closes, err = parse_iso8601_utc_time(not_on_or_after)
+        if not closes then
             return false, "carries an unreadable NotOnOrAfter " .. not_on_or_after .. ": " .. err
         end
-        if now - skew >= at then
-            return false, "is not valid on or after " .. not_on_or_after
-        end
+    end
+
+    -- A window that opens after it closes is empty on every clock, so the skew
+    -- allowance has no say in it: without this, each end on its own looks
+    -- acceptable and an inversion of up to twice the allowance passes. Strictly
+    -- later rather than not earlier, since a fractional second is truncated away
+    -- and two instants inside one second read as equal.
+    if opens and closes and opens > closes then
+        return false, "opens at " .. not_before .. " and closes at " .. not_on_or_after
+    end
+
+    if opens and now + skew < opens then
+        return false, "is not valid before " .. not_before
+    end
+
+    if closes and now - skew >= closes then
+        return false, "is not valid on or after " .. not_on_or_after
     end
 
     return true

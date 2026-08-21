@@ -82,6 +82,8 @@ typedef enum {
   SAML_INVALID_DOC,
   SAML_INVALID_SIG_ALG,
   SAML_INVALID_SIGNATURE,
+  SAML_UNSIGNED_IDENTITY,
+  SAML_HAS_DTD,
 } saml_binding_status_t;
 
 char* saml_binding_error_msg(saml_binding_status_t status);
@@ -103,6 +105,8 @@ void saml_shutdown();
 
 int saml_doc_validate(xmlDoc* doc);
 xmlChar* saml_doc_issuer(xmlDoc* doc);
+int saml_doc_issuers(xmlDoc* doc, xmlChar*** issuers, size_t* issuers_len);
+void saml_issuers_free(xmlChar** issuers, size_t issuers_len);
 xmlChar* saml_doc_name_id(xmlDoc* doc);
 xmlChar* saml_doc_status_code(xmlDoc* doc);
 xmlChar* saml_doc_session_index(xmlDoc* doc);
@@ -110,6 +114,8 @@ xmlChar* saml_doc_session_expires(xmlDoc* doc);
 int saml_doc_attrs(xmlDoc* doc, saml_attr_t** attrs, size_t* attrs_len);
 void saml_attrs_free(saml_attr_t* attrs, size_t attrs_len);
 int saml_doc_assertions(xmlDoc* doc, saml_assertion_t** assertions, size_t* assertions_len);
+int saml_doc_destination(xmlDoc* doc, xmlChar** destination);
+int saml_doc_in_response_to(xmlDoc* doc, xmlChar** in_response_to);
 void saml_assertions_free(saml_assertion_t* assertions, size_t assertions_len);
 
 xmlSecTransformCtx* saml_sign_binary(xmlSecKey* key, xmlSecTransformId transform_id, unsigned char* data, size_t data_len);

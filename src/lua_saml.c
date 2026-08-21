@@ -386,7 +386,7 @@ static int doc_name_id(lua_State* L) {
 
 
 /***
-Get the text of the issuer node
+Get the issuer of the assertion a Response carries, or of the message itself
 @function doc_issuer
 @tparam xmlDoc* doc
 @treturn ?string issuer
@@ -403,6 +403,35 @@ static int doc_issuer(lua_State* L) {
     lua_pushstring(L, (char*)issuer);
     xmlFree(issuer);
   }
+  return 1;
+}
+
+
+/***
+Get the issuer of every assertion whose content the document's readers consume
+@function doc_issuers
+@tparam xmlDoc* doc
+@treturn table issuers
+*/
+static int doc_issuers(lua_State* L) {
+  lua_settop(L, 1);
+  xmlDoc* doc = doc_check(L, 1);
+  lua_pop(L, 1);
+
+  xmlChar** issuers;
+  size_t issuers_len;
+  if (saml_doc_issuers(doc, &issuers, &issuers_len) < 0) {
+    lua_pushnil(L);
+    return 1;
+  }
+
+  lua_newtable(L);
+  for (size_t i = 0; i < issuers_len; i++) {
+    lua_pushinteger(L, i + 1);
+    lua_pushstring(L, issuers[i] == NULL ? "" : (char*)issuers[i]);
+    lua_settable(L, -3);
+  }
+  saml_issuers_free(issuers, issuers_len);
   return 1;
 }
 
@@ -524,26 +553,28 @@ Get the InResponseTo attribute of the root message
 @function doc_in_response_to
 @tparam xmlDoc* doc
 @treturn ?string in_response_to
+@treturn ?string error
 */
 static int doc_in_response_to(lua_State* L) {
   lua_settop(L, 1);
   xmlDoc* doc = doc_check(L, 1);
   lua_pop(L, 1);
 
-  xmlNode* root = xmlDocGetRootElement(doc);
-  if (root == NULL) {
+  xmlChar* in_response_to;
+  if (saml_doc_in_response_to(doc, &in_response_to) < 0) {
     lua_pushnil(L);
-    return 1;
+    lua_pushstring(L, "could not read InResponseTo");
+    return 2;
   }
 
-  xmlChar* in_response_to = xmlGetNoNsProp(root, (const xmlChar*)"InResponseTo");
   if (in_response_to == NULL) {
     lua_pushnil(L);
   } else {
     lua_pushstring(L, (char*)in_response_to);
     xmlFree(in_response_to);
   }
-  return 1;
+  lua_pushnil(L);
+  return 2;
 }
 
 
@@ -552,26 +583,30 @@ Get the Destination attribute of the root message
 @function doc_destination
 @tparam xmlDoc* doc
 @treturn ?string destination
+@treturn ?string error
 */
 static int doc_destination(lua_State* L) {
   lua_settop(L, 1);
   xmlDoc* doc = doc_check(L, 1);
   lua_pop(L, 1);
 
-  xmlNode* root = xmlDocGetRootElement(doc);
-  if (root == NULL) {
+  // nil for an absent Destination and nil for one that could not be read would
+  // be the same answer to the caller, and it skips the check on the first
+  xmlChar* destination;
+  if (saml_doc_destination(doc, &destination) < 0) {
     lua_pushnil(L);
-    return 1;
+    lua_pushstring(L, "could not read Destination");
+    return 2;
   }
 
-  xmlChar* destination = xmlGetNoNsProp(root, (const xmlChar*)"Destination");
   if (destination == NULL) {
     lua_pushnil(L);
   } else {
     lua_pushstring(L, (char*)destination);
     xmlFree(destination);
   }
-  return 1;
+  lua_pushnil(L);
+  return 2;
 }
 
 
@@ -1315,6 +1350,7 @@ static const struct luaL_Reg saml_funcs[] = {
   {"doc_root_name", doc_root_name},
   {"doc_id", doc_id},
   {"doc_issuer", doc_issuer},
+  {"doc_issuers", doc_issuers},
   {"doc_name_id", doc_name_id},
   {"doc_status_code", doc_status_code},
   {"doc_session_index", doc_session_index},

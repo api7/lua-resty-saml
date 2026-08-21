@@ -89,9 +89,11 @@ local saml = resty_saml.new(opts)
 An ID is minted for every `AuthnRequest` this SP sends and kept on the session as
 `saml_request_id`. On the way back, a `SubjectConfirmationData` naming a different
 request refuses the login, so an assertion captured from one login cannot be
-presented in another. `Response/@InResponseTo` is weighed the same way, though it
-sits outside the signature, so it catches a misdirected answer rather than a
-deliberate one.
+presented in another. `Response/@InResponseTo` is weighed the same way,
+though what it is worth depends on what the IdP signed: an IdP signing the whole
+`Response` covers it, while one signing only the assertion, the common shape, leaves
+it outside the signature, where the party replaying an assertion deletes it. Rely on
+the copy inside the assertion, and read this one as catching a misdirected answer.
 
 That guarantee is worth what the IdP sends. Profile 4.1.4.2 asks an IdP answering an
 `AuthnRequest` to name it, and every mainstream IdP does, but an IdP that leaves

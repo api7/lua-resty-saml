@@ -189,7 +189,10 @@ local function logout_request(opts, name_id, session_index)
     })
 end
 
-local function login(self, opts)
+-- request_uri is where to return once the IdP answers. It defaults to what is
+-- being asked for, and is passed in when a login is restarted from somewhere
+-- else, where ngx.var.request_uri is that somewhere else.
+local function login(self, opts, request_uri)
     local sess = session.start(self.session_config)
 
     local authenticated = sess:get("authenticated")
@@ -213,7 +216,7 @@ local function login(self, opts)
     end
 
     local state = uuid.generate_v4()
-    local request_uri = ngx.var.request_uri
+    request_uri = request_uri or ngx.var.request_uri
     -- kept so the callback can tell the answer to this request from the answer
     -- to some other one
     local request_id = generate_saml_id()
@@ -379,10 +382,12 @@ local function confirmation_ok(confirmation, expected, now, skew)
     if confirmation.recipient ~= expected.acs_url then
         return false
     end
-    -- inside the signature, so this is the binding a replayed assertion cannot
-    -- be rewritten to satisfy. An IdP that leaves it out is left working, with
-    -- the Response-level check standing in until it arrives.
-    if confirmation.in_response_to and confirmation.in_response_to ~= expected.request_id then
+    -- The confirmation has to name the request this SP issued, on the same
+    -- footing as Recipient and for the same reason: one that names no request
+    -- binds the assertion to no login, which is the shape a replay arrives in.
+    -- Profile 4.1.4.2 requires the value of an IdP answering an AuthnRequest,
+    -- and answering one is the only thing this SP ever asks for.
+    if confirmation.in_response_to ~= expected.request_id then
         return false
     end
     return (time_bounds_ok(confirmation.not_before, confirmation.not_on_or_after, now, skew))
@@ -506,6 +511,16 @@ local function login_callback(self, opts)
 
     local request_uri = sess:get("request_uri")
 
+    -- A session minted before this SP kept the ID of the request it issued has
+    -- nothing for the assertion to name, and refusing dead-ends a login that is
+    -- genuinely this user's. Starting over gets a request that is remembered,
+    -- and cannot repeat, since the session it mints carries one.
+    local request_id = sess:get("saml_request_id")
+    if not request_id then
+        ngx.log(ngx.WARN, "session carries no request id, starting the login again")
+        return login(self, opts, request_uri)
+    end
+
     local method = ngx.req.get_method()
     local doc, args, err
     if method == "POST" then
@@ -535,7 +550,7 @@ local function login_callback(self, opts)
 
     local expected = {
         acs_url = sp_acs_url(opts),
-        request_id = sess:get("saml_request_id"),
+        request_id = request_id,
     }
 
     -- the Response is often left unsigned, so this only catches a stray answer;

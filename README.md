@@ -84,6 +84,33 @@ local saml = resty_saml.new(opts)
 | `sp_audiences`      | array of strings       | `{ sp_issuer }`      | Audiences this SP answers to. An assertion carrying an `AudienceRestriction` has to name one of them; an assertion carrying none is unrestricted.       |
 | `clock_skew`      | number       | `60`      | Seconds of clock difference tolerated against the IdP when weighing `NotBefore` and `NotOnOrAfter`.       |
 
+#### Binding a response to the request
+
+An ID is minted for every `AuthnRequest` this SP sends and kept on the session as
+`saml_request_id`. On the way back, a `SubjectConfirmationData` has to name that ID
+in its `InResponseTo`, so an assertion captured from one login cannot be presented
+in another. `Response/@InResponseTo` is weighed as well when it is there, though it
+sits outside the signature, so it catches a misdirected answer rather than a
+deliberate one.
+
+Two consequences worth knowing before upgrading:
+
+- An IdP that leaves `InResponseTo` off `SubjectConfirmationData` is refused. Profile
+  4.1.4.2 requires the value of an IdP answering an `AuthnRequest`, and answering one
+  is the only thing this SP ever asks for: a response arriving with no login in
+  progress is refused whatever it carries.
+- A session minted before this SP kept the ID has nothing for the assertion to name,
+  so the login is started again rather than refused. The window lasts as long as an
+  `AuthnRequest` is outstanding across the upgrade.
+
+#### Seeding the worker
+
+Request IDs and `RelayState` both come from `resty.jit-uuid`, which is seeded when
+this module is first loaded, from the clock and the process ID. Loading `resty.saml`
+from `init_by_lua` therefore seeds once in the master, and every worker forked after
+it inherits that same sequence. Require this module from `init_worker_by_lua`, or
+call `uuid.seed()` there yourself.
+
 #### saml:authenticate()
 
 **syntax:** *data = saml:authenticate()*

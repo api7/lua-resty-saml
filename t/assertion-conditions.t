@@ -14,6 +14,11 @@ add_block_preprocessor(sub {
 
     if ((!defined $block->error_log) && (!defined $block->no_error_log)) {
         $block->set_value("no_error_log", "[error]");
+    } elsif (!defined $block->no_error_log) {
+        # a block naming the error it expects gets no other assertion about the
+        # log, so a block that also drives a success asserts nothing about that
+        # half. This is the part of it that can be said generically.
+        $block->set_value("no_error_log", "[crit]\n[alert]\n[emerg]");
     }
 
     if (!defined $block->request) {
@@ -256,6 +261,26 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
             return res.status .. " " .. tostring(res.headers["Location"])
         end
 
+        -- hand a response to a session the old code would have left behind
+        function login_with_legacy(name, xml)
+            local httpc = require("resty.http").new()
+            local base = "http://127.0.0.1:1984"
+
+            local res = assert(httpc:request_uri(base .. "/legacy", {
+                headers = { ["X-Test-SP"] = name },
+            }))
+            local cookie = res.headers["Set-Cookie"]
+            if type(cookie) == "table" then cookie = cookie[1] end
+
+            res = assert(httpc:request_uri(base .. "/acs", {
+                method = "POST",
+                body = "SAMLResponse=" .. ngx.escape_uri(saml.base64_encode(xml)) ..
+                    "&RelayState=legacy-state",
+                headers = callback_headers(name, cookie),
+            }))
+            return res.status .. " " .. (res.headers["Location"] or ""):match("^[^?]*")
+        end
+
         -- log in, then ask the app again carrying the session the callback
         -- handed out: a live session answers 200, an expired one starts over
         function session_after_login(name, xml)
@@ -296,6 +321,19 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
 
     server {
         listen 1984;
+
+        # a login in progress with no record of the request that started it,
+        # the shape a session minted before the binding existed has
+        location /legacy {
+            content_by_lua_block {
+                local name = ngx.var.http_x_test_sp or "plain"
+                local sess = require("resty.session").start(sp(name).session_config)
+                sess:set("saml_state", "legacy-state")
+                sess:set("request_uri", "/")
+                sess:save()
+                ngx.exit(200)
+            }
+        }
 
         location / {
             access_by_lua_block {
@@ -468,9 +506,13 @@ offers no subject confirmation this SP can satisfy
 --- config
     location /t {
         content_by_lua_block {
-            ngx.say(login_with("plain", saml_response({
-                confirmations = confirmation({ recipient = ACS, not_on_or_after = at(300) }),
-            })))
+            ngx.say(login_with("plain", function(request_id)
+                return saml_response({
+                    confirmations = confirmation({
+                        recipient = ACS, not_on_or_after = at(300), in_response_to = request_id,
+                    }),
+                })
+            end))
         }
     }
 --- response_body
@@ -498,10 +540,14 @@ offers no subject confirmation this SP can satisfy
 --- config
     location /t {
         content_by_lua_block {
-            ngx.say(login_with("plain", saml_response({
-                confirmations = confirmation({ recipient = "http://evil.example.com/acs" }) ..
-                    confirmation({ recipient = ACS, not_on_or_after = at(300) }),
-            })))
+            ngx.say(login_with("plain", function(request_id)
+                return saml_response({
+                    confirmations = confirmation({ recipient = "http://evil.example.com/acs" }) ..
+                        confirmation({
+                            recipient = ACS, not_on_or_after = at(300), in_response_to = request_id,
+                        }),
+                })
+            end))
         }
     }
 --- response_body
@@ -620,10 +666,18 @@ env TZ=XXX-14;
 --- config
     location /t {
         content_by_lua_block {
-            local elsewhere = saml_response({
-                confirmations = confirmation({ recipient = "https://sp.example.com/acs" }),
-            })
-            local here = saml_response({ confirmations = confirmation({ recipient = ACS }) })
+            local function elsewhere(request_id)
+                return saml_response({
+                    confirmations = confirmation({
+                        recipient = "https://sp.example.com/acs", in_response_to = request_id,
+                    }),
+                })
+            end
+            local function here(request_id)
+                return saml_response({
+                    confirmations = confirmation({ recipient = ACS, in_response_to = request_id }),
+                })
+            end
             local forged = {
                 ["X-Forwarded-Proto"] = "https",
                 ["X-Forwarded-Host"] = "sp.example.com",
@@ -914,3 +968,38 @@ offers no subject confirmation this SP can satisfy
     }
 --- response_body
 302 /
+
+
+=== TEST 30: a confirmation naming no request confirms nothing
+--- config
+    location /t {
+        content_by_lua_block {
+            -- an assertion that names no request is bound to no login, which is
+            -- the shape a captured one is replayed in
+            ngx.say(login_with("plain", saml_response({
+                confirmations = confirmation({ recipient = ACS }),
+            })))
+        }
+    }
+--- response_body
+401 nil
+--- error_log
+offers no subject confirmation this SP can satisfy
+
+
+=== TEST 31: a session minted before the binding starts the login again
+--- config
+    location /t {
+        content_by_lua_block {
+            -- nothing to compare the assertion against, and the login is
+            -- genuinely this user's, so send them back to the IdP for one
+            -- that is remembered
+            ngx.say(login_with_legacy("plain", saml_response({
+                confirmations = confirmation({ recipient = ACS, in_response_to = "ID_earlier" }),
+            })))
+        }
+    }
+--- response_body
+302 http://127.0.0.1:1984/idp
+--- error_log
+session carries no request id, starting the login again

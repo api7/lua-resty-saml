@@ -87,21 +87,22 @@ local saml = resty_saml.new(opts)
 #### Binding a response to the request
 
 An ID is minted for every `AuthnRequest` this SP sends and kept on the session as
-`saml_request_id`. On the way back, a `SubjectConfirmationData` has to name that ID
-in its `InResponseTo`, so an assertion captured from one login cannot be presented
-in another. `Response/@InResponseTo` is weighed as well when it is there, though it
+`saml_request_id`. On the way back, a `SubjectConfirmationData` naming a different
+request refuses the login, so an assertion captured from one login cannot be
+presented in another. `Response/@InResponseTo` is weighed the same way, though it
 sits outside the signature, so it catches a misdirected answer rather than a
 deliberate one.
 
-Two consequences worth knowing before upgrading:
+That guarantee is worth what the IdP sends. Profile 4.1.4.2 asks an IdP answering an
+`AuthnRequest` to name it, and every mainstream IdP does, but an IdP that leaves
+`InResponseTo` out, or sends no `SubjectConfirmation` at all, keeps working and gets
+no binding. Refusing it would trade a working login for protection against another
+party's misconfiguration, and no attacker can produce the shape: the value sits
+inside the signature, so it cannot be stripped from a captured assertion.
 
-- An IdP that leaves `InResponseTo` off `SubjectConfirmationData` is refused. Profile
-  4.1.4.2 requires the value of an IdP answering an `AuthnRequest`, and answering one
-  is the only thing this SP ever asks for: a response arriving with no login in
-  progress is refused whatever it carries.
-- A session minted before this SP kept the ID has nothing for the assertion to name,
-  so the login is started again rather than refused. The window lasts as long as an
-  `AuthnRequest` is outstanding across the upgrade.
+One note for upgrading. A session minted before this SP kept the ID has nothing for
+the assertion to name, so the login is started again rather than refused. The window
+lasts as long as an `AuthnRequest` is outstanding across the upgrade.
 
 #### Seeding the worker
 

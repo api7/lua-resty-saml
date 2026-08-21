@@ -382,12 +382,13 @@ local function confirmation_ok(confirmation, expected, now, skew)
     if confirmation.recipient ~= expected.acs_url then
         return false
     end
-    -- The confirmation has to name the request this SP issued, on the same
-    -- footing as Recipient and for the same reason: one that names no request
-    -- binds the assertion to no login, which is the shape a replay arrives in.
-    -- Profile 4.1.4.2 requires the value of an IdP answering an AuthnRequest,
-    -- and answering one is the only thing this SP ever asks for.
-    if confirmation.in_response_to ~= expected.request_id then
+    -- Checked when the IdP names a request, and not demanded. Naming one is
+    -- what profile 4.1.4.2 asks of an IdP answering an AuthnRequest, so an IdP
+    -- that leaves it out is already out of spec, and refusing that trades a
+    -- working login for protection against somebody else's misconfiguration.
+    -- Nothing an attacker sends produces the shape: the value sits inside the
+    -- signature, so it cannot be stripped from a captured assertion.
+    if confirmation.in_response_to and confirmation.in_response_to ~= expected.request_id then
         return false
     end
     return (time_bounds_ok(confirmation.not_before, confirmation.not_on_or_after, now, skew))

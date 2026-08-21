@@ -506,13 +506,9 @@ offers no subject confirmation this SP can satisfy
 --- config
     location /t {
         content_by_lua_block {
-            ngx.say(login_with("plain", function(request_id)
-                return saml_response({
-                    confirmations = confirmation({
-                        recipient = ACS, not_on_or_after = at(300), in_response_to = request_id,
-                    }),
-                })
-            end))
+            ngx.say(login_with("plain", saml_response({
+                confirmations = confirmation({ recipient = ACS, not_on_or_after = at(300) }),
+            })))
         }
     }
 --- response_body
@@ -540,14 +536,10 @@ offers no subject confirmation this SP can satisfy
 --- config
     location /t {
         content_by_lua_block {
-            ngx.say(login_with("plain", function(request_id)
-                return saml_response({
-                    confirmations = confirmation({ recipient = "http://evil.example.com/acs" }) ..
-                        confirmation({
-                            recipient = ACS, not_on_or_after = at(300), in_response_to = request_id,
-                        }),
-                })
-            end))
+            ngx.say(login_with("plain", saml_response({
+                confirmations = confirmation({ recipient = "http://evil.example.com/acs" }) ..
+                    confirmation({ recipient = ACS, not_on_or_after = at(300) }),
+            })))
         }
     }
 --- response_body
@@ -666,18 +658,10 @@ env TZ=XXX-14;
 --- config
     location /t {
         content_by_lua_block {
-            local function elsewhere(request_id)
-                return saml_response({
-                    confirmations = confirmation({
-                        recipient = "https://sp.example.com/acs", in_response_to = request_id,
-                    }),
-                })
-            end
-            local function here(request_id)
-                return saml_response({
-                    confirmations = confirmation({ recipient = ACS, in_response_to = request_id }),
-                })
-            end
+            local elsewhere = saml_response({
+                confirmations = confirmation({ recipient = "https://sp.example.com/acs" }),
+            })
+            local here = saml_response({ confirmations = confirmation({ recipient = ACS }) })
             local forged = {
                 ["X-Forwarded-Proto"] = "https",
                 ["X-Forwarded-Host"] = "sp.example.com",
@@ -970,21 +954,20 @@ offers no subject confirmation this SP can satisfy
 302 /
 
 
-=== TEST 30: a confirmation naming no request confirms nothing
+=== TEST 30: a confirmation naming no request keeps working
 --- config
     location /t {
         content_by_lua_block {
-            -- an assertion that names no request is bound to no login, which is
-            -- the shape a captured one is replayed in
+            -- naming one is what the profile asks of an IdP answering a
+            -- request, so an IdP that leaves it out is already out of spec.
+            -- The binding is worth what that IdP sends and no more.
             ngx.say(login_with("plain", saml_response({
                 confirmations = confirmation({ recipient = ACS }),
             })))
         }
     }
 --- response_body
-401 nil
---- error_log
-offers no subject confirmation this SP can satisfy
+302 /
 
 
 === TEST 31: a session minted before the binding starts the login again

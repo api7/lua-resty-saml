@@ -14,6 +14,11 @@ add_block_preprocessor(sub {
 
     if ((!defined $block->error_log) && (!defined $block->no_error_log)) {
         $block->set_value("no_error_log", "[error]");
+    } elsif (!defined $block->no_error_log) {
+        # a block naming the error it expects gets no other assertion about the
+        # log, so a block that also drives a success asserts nothing about that
+        # half. This is the part of it that can be said generically.
+        $block->set_value("no_error_log", "[crit]\n[alert]\n[emerg]");
     }
 
     if (!defined $block->request) {
@@ -169,15 +174,28 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
                 spec.method or BEARER, data)
         end
 
-        -- Conditions follows Subject, the order the schema prescribes
+        function authn_statement(session_expires)
+            if session_expires == nil then
+                return ""
+            end
+            return string.format('<saml:AuthnStatement AuthnInstant="2026-07-21T00:00:00Z"%s>' ..
+                '<saml:AuthnContext><saml:AuthnContextClassRef>' ..
+                'urn:oasis:names:tc:SAML:2.0:ac:classes:Password' ..
+                '</saml:AuthnContextClassRef></saml:AuthnContext></saml:AuthnStatement>',
+                attr("SessionNotOnOrAfter", session_expires))
+        end
+
+        -- Subject, then Conditions, then the statements, the order the schema
+        -- prescribes
         function assertion(spec)
             spec = spec or {}
             return string.format('<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ' ..
                 'ID="%s" Version="2.0" IssueInstant="2026-07-21T00:00:00Z">' ..
                 '<saml:Issuer>%s</saml:Issuer>' ..
-                '<saml:Subject><saml:NameID>%s</saml:NameID>%s</saml:Subject>%s</saml:Assertion>',
+                '<saml:Subject><saml:NameID>%s</saml:NameID>%s</saml:Subject>%s%s</saml:Assertion>',
                 spec.id or "a1", IDP, spec.name_id or "signed\@example.com",
-                spec.confirmations or "", spec.conditions or "")
+                spec.confirmations or "", spec.conditions or "",
+                authn_statement(spec.session_expires))
         end
 
         function response(body, destination, in_response_to)
@@ -246,6 +264,56 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
             return res.status .. " " .. tostring(res.headers["Location"])
         end
 
+        -- hand a response to a session the old code would have left behind
+        function login_with_legacy(name, xml)
+            local httpc = require("resty.http").new()
+            local base = "http://127.0.0.1:1984"
+
+            local res = assert(httpc:request_uri(base .. "/legacy", {
+                headers = { ["X-Test-SP"] = name },
+            }))
+            local cookie = res.headers["Set-Cookie"]
+            if type(cookie) == "table" then cookie = cookie[1] end
+
+            res = assert(httpc:request_uri(base .. "/acs", {
+                method = "POST",
+                body = "SAMLResponse=" .. ngx.escape_uri(saml.base64_encode(xml)) ..
+                    "&RelayState=legacy-state",
+                headers = callback_headers(name, cookie),
+            }))
+            return res.status .. " " .. (res.headers["Location"] or ""):match("^[^?]*")
+        end
+
+        -- log in, then ask the app again carrying the session the callback
+        -- handed out: a live session answers 200, an expired one starts over
+        function session_after_login(name, xml)
+            local httpc = require("resty.http").new()
+            local base = "http://127.0.0.1:1984"
+            local headers = { ["X-Test-SP"] = name }
+
+            local res = assert(httpc:request_uri(base .. "/", { headers = headers }))
+            local cookie = res.headers["Set-Cookie"]
+            if type(cookie) == "table" then cookie = cookie[1] end
+            local state = res.headers["Location"]:match("RelayState=([^&]+)")
+
+            res = assert(httpc:request_uri(base .. "/acs", {
+                method = "POST",
+                body = "SAMLResponse=" .. ngx.escape_uri(saml.base64_encode(xml)) ..
+                    "&RelayState=" .. state,
+                headers = callback_headers(name, cookie),
+            }))
+            if res.status ~= 302 then return "callback: " .. res.status end
+
+            local rotated = res.headers["Set-Cookie"]
+            if type(rotated) == "table" then rotated = rotated[1] end
+            if rotated then cookie = rotated end
+
+            res = assert(httpc:request_uri(base .. "/", {
+                headers = { ["X-Test-SP"] = name, ["Cookie"] = cookie:match("^[^;]+") },
+            }))
+            return res.status
+        end
+
         function parse(xml)
             local key = assert(saml.key_read_memory(CERT_PEM, saml.KeyDataFormatCertPem))
             local mngr = assert(saml.create_keys_manager({ key }))
@@ -256,6 +324,19 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
 
     server {
         listen 1984;
+
+        # a login in progress with no record of the request that started it,
+        # the shape a session minted before the binding existed has
+        location /legacy {
+            content_by_lua_block {
+                local name = ngx.var.http_x_test_sp or "plain"
+                local sess = require("resty.session").start(sp(name).session_config)
+                sess:set("saml_state", "legacy-state")
+                sess:set("request_uri", "/")
+                sess:save()
+                ngx.exit(200)
+            }
+        }
 
         location / {
             access_by_lua_block {
@@ -289,6 +370,7 @@ __DATA__
 302 /
 
 
+
 === TEST 2: an expired assertion is refused however it is replayed
 --- config
     location /t {
@@ -304,6 +386,7 @@ __DATA__
 is not valid on or after
 
 
+
 === TEST 3: an assertion whose window has not opened is refused
 --- config
     location /t {
@@ -317,6 +400,7 @@ is not valid on or after
 401 nil
 --- error_log
 is not valid before
+
 
 
 === TEST 4: the clock skew allowance covers a small difference with the IdP
@@ -335,6 +419,7 @@ is not valid before
 is not valid on or after
 
 
+
 === TEST 5: an assertion restricted to another SP is refused
 --- config
     location /t {
@@ -351,6 +436,7 @@ is not valid on or after
 is restricted to https://other.example.com
 
 
+
 === TEST 6: an assertion restricted to this SP is accepted
 --- config
     location /t {
@@ -362,6 +448,7 @@ is restricted to https://other.example.com
     }
 --- response_body
 302 /
+
 
 
 === TEST 7: sp_audiences names the audience the IdP was configured with
@@ -382,6 +469,7 @@ is restricted to https://other.example.com
 is restricted to https://sp.example.com/metadata
 
 
+
 === TEST 8: each AudienceRestriction narrows the audience on its own
 --- config
     location /t {
@@ -400,6 +488,7 @@ is restricted to https://sp.example.com/metadata
 is restricted to https://other.example.com
 
 
+
 === TEST 9: a confirmation addressed to another endpoint is refused
 --- config
     location /t {
@@ -415,6 +504,7 @@ is restricted to https://other.example.com
 offers no subject confirmation this SP can satisfy
 
 
+
 === TEST 10: a confirmation addressed here and still open is accepted
 --- config
     location /t {
@@ -426,6 +516,7 @@ offers no subject confirmation this SP can satisfy
     }
 --- response_body
 302 /
+
 
 
 === TEST 11: a confirmation that has run out is refused
@@ -443,6 +534,7 @@ offers no subject confirmation this SP can satisfy
 offers no subject confirmation this SP can satisfy
 
 
+
 === TEST 12: one satisfiable confirmation among several is enough
 --- config
     location /t {
@@ -455,6 +547,7 @@ offers no subject confirmation this SP can satisfy
     }
 --- response_body
 302 /
+
 
 
 === TEST 13: a condition this SP cannot satisfy leaves the assertion indeterminate
@@ -487,6 +580,7 @@ offers no subject confirmation this SP can satisfy
 qr/carries a condition this SP cannot satisfy: Condition/]
 
 
+
 === TEST 14: a response addressed to another endpoint is refused
 --- config
     location /t {
@@ -502,6 +596,7 @@ qr/carries a condition this SP cannot satisfy: Condition/]
 response from IdP is addressed to http://evil.example.com/acs
 
 
+
 === TEST 15: an assertion carrying no constraints is still accepted
 --- config
     location /t {
@@ -511,6 +606,7 @@ response from IdP is addressed to http://evil.example.com/acs
     }
 --- response_body
 302 /
+
 
 
 === TEST 16: the constraints are reported per assertion, not pooled
@@ -540,6 +636,7 @@ a2 conditions=false expires=nil audiences=0 confirmations=1
 destination: nil
 
 
+
 === TEST 17: a UTC timestamp is read as UTC whatever the machine's timezone is
 --- config
     location /t {
@@ -557,6 +654,7 @@ env SAML_DATA_DIR=./;
 env TZ=XXX-14;
 --- response_body
 302 /
+
 
 
 === TEST 18: a configured ACS URL settles what the endpoint checks compare against
@@ -578,14 +676,24 @@ env TZ=XXX-14;
             ngx.say(login_with("acs", elsewhere, forged))
             -- and headers that disagree cannot refuse an assertion that names it
             ngx.say(login_with("acs", here, forged))
+
+            -- the same value settles Destination, which is read on a response
+            -- carrying no confirmation to weigh
+            local addressed = saml_response({}, "https://sp.example.com/acs")
+            ngx.say(login_with("plain", addressed, forged))
+            ngx.say(login_with("acs", addressed, forged))
         }
     }
 --- response_body
 302 /
 401 nil
 302 /
---- error_log
-offers no subject confirmation this SP can satisfy
+302 /
+401 nil
+--- error_log eval
+[qr/offers no subject confirmation this SP can satisfy/,
+qr{addressed to https://sp\.example\.com/acs}]
+
 
 
 === TEST 19: an audience with no text leaves the rest of its restriction readable
@@ -603,7 +711,208 @@ offers no subject confirmation this SP can satisfy
 302 /
 
 
-=== TEST 20: a response answering another request is refused
+
+=== TEST 20: a confirmation that states nothing confirms nothing
+--- config
+    location /t {
+        content_by_lua_block {
+            local elsewhere = confirmation({ recipient = "https://evil.example.com/acs" })
+
+            -- no SubjectConfirmationData at all
+            ngx.say(login_with("plain", saml_response({
+                confirmations = confirmation({ data = false }),
+            })))
+            -- the element written out with nothing in it, which the schema
+            -- allows since every attribute on it is optional
+            ngx.say(login_with("plain", saml_response({
+                confirmations = confirmation({}),
+            })))
+            -- and neither spelling may answer in place of a sibling that binds
+            -- the assertion somewhere else
+            ngx.say(login_with("plain", saml_response({
+                confirmations = elsewhere .. confirmation({ data = false }),
+            })))
+            ngx.say(login_with("plain", saml_response({
+                confirmations = elsewhere .. confirmation({}),
+            })))
+            -- nor may one carrying only a condition that happens to hold
+            ngx.say(login_with("plain", saml_response({
+                confirmations = elsewhere .. confirmation({ not_before = at(-600) }),
+            })))
+        }
+    }
+--- response_body
+401 nil
+401 nil
+401 nil
+401 nil
+401 nil
+--- error_log
+offers no subject confirmation this SP can satisfy
+
+
+
+=== TEST 21: session lifetime follows the IdP's clock, not the machine's
+--- config
+    location /t {
+        content_by_lua_block {
+            -- ten minutes of session left, with the worker fourteen hours
+            -- ahead of UTC: read as local time it would already be spent
+            ngx.say(session_after_login("plain", saml_response({ session_expires = at(600) })))
+            -- and ten minutes past, which is spent either way
+            ngx.say(session_after_login("plain", saml_response({ session_expires = at(-600) })))
+        }
+    }
+--- main_config
+env SAML_DATA_DIR=./;
+env TZ=XXX-14;
+--- response_body
+200
+302
+
+
+
+=== TEST 22: a newline smuggled into the response cannot split a log line
+--- config
+    location /t {
+        content_by_lua_block {
+            -- Destination rides the unsigned wrapper, so it is the sender's to
+            -- write, and a character reference is not folded to a space the way
+            -- a literal newline would be
+            ngx.say(login_with("plain", saml_response({}, "https://x&#10;WARNING-forged-entry")))
+        }
+    }
+--- response_body
+401 nil
+--- error_log
+addressed to https://x\x0AWARNING-forged-entry
+
+
+
+=== TEST 23: a year the parser cannot hold is refused, not read from part way in
+--- config
+    location /t {
+        content_by_lua_block {
+            -- 9999 BCE, which the schema accepts: unanchored, the match starts
+            -- after the minus and reads a far-future 9999 CE out of an
+            -- already-expired bound
+            ngx.say(login_with("plain", saml_response({
+                conditions = conditions({ not_on_or_after = "-9999-01-01T00:00:00Z" }),
+            })))
+            -- five digits, where the match can start one character in
+            ngx.say(login_with("plain", saml_response({
+                conditions = conditions({ not_on_or_after = "20260-01-01T00:00:00Z" }),
+            })))
+            -- a fractional second is still read
+            ngx.say(login_with("plain", saml_response({
+                conditions = conditions({ not_on_or_after = (at(600):gsub("Z", ".500Z")) }),
+            })))
+        }
+    }
+--- response_body
+401 nil
+401 nil
+302 /
+--- error_log
+carries an unreadable NotOnOrAfter -9999-01-01T00:00:00Z
+
+
+
+=== TEST 24: an unreadable session expiry is an error, not a 200 carrying one
+--- config
+    location /t {
+        content_by_lua_block {
+            local httpc = require("resty.http").new()
+            local base = "http://127.0.0.1:1984"
+
+            local res = assert(httpc:request_uri(base .. "/", { headers = { ["X-Test-SP"] = "plain" } }))
+            local cookie = res.headers["Set-Cookie"]
+            if type(cookie) == "table" then cookie = cookie[1] end
+            local state = res.headers["Location"]:match("RelayState=([^&]+)")
+
+            -- schema-valid xs:dateTime this parser will not read: a numeric
+            -- offset where SAML requires Z
+            local xml = saml_response({ session_expires = "2030-01-01T00:00:00+00:00" })
+            res = assert(httpc:request_uri(base .. "/acs", {
+                method = "POST",
+                body = "SAMLResponse=" .. ngx.escape_uri(saml.base64_encode(xml)) ..
+                    "&RelayState=" .. state,
+                headers = callback_headers("plain", cookie),
+            }))
+            -- the status the branch always meant to send, and the parse
+            -- error kept out of the body it used to be written into
+            ngx.say(res.status, " leaks=",
+                tostring(((res.body or ""):find("UTC time", 1, true)) ~= nil))
+        }
+    }
+--- response_body
+500 leaks=false
+--- error_log
+unreadable SessionNotOnOrAfter 2030-01-01T00:00:00+00:00
+
+
+
+=== TEST 25: a window that opens after it closes is empty on every clock
+--- config
+    location /t {
+        content_by_lua_block {
+            -- inverted by less than twice the skew allowance, so each end taken
+            -- on its own still looks acceptable
+            ngx.say(login_with("plain", saml_response({
+                conditions = conditions({ not_before = at(30), not_on_or_after = at(-30) }),
+            })))
+            -- the same shape on a subject confirmation, which shares the check
+            ngx.say(login_with("plain", saml_response({
+                confirmations = confirmation({ recipient = ACS,
+                    not_before = at(30), not_on_or_after = at(-30) }),
+            })))
+            -- both ends inside one second still reads as open, since the
+            -- fractional part is truncated away before they are compared
+            ngx.say(login_with("plain", saml_response({
+                conditions = conditions({ not_before = at(0), not_on_or_after = at(0) }),
+            })))
+        }
+    }
+--- response_body
+401 nil
+401 nil
+302 /
+--- error_log eval
+[qr/opens at .* and closes at /,
+qr/offers no subject confirmation this SP can satisfy/]
+
+
+
+=== TEST 26: a document type declaration is refused, whatever it declares
+--- config
+    location /t {
+        content_by_lua_block {
+            -- an ATTLIST default answers every reader that asks the node for an
+            -- attribute, without ever being written onto the node, and
+            -- canonicalisation drops the prologue before anything is hashed. So
+            -- this invents a Recipient inside signed content while leaving every
+            -- signature intact, whichever scope it covers
+            local doctype = '<!DOCTYPE samlp:Response [<!ATTLIST saml:SubjectConfirmationData ' ..
+                'Recipient CDATA "http://127.0.0.1:1984/acs">]>'
+            local body = assertion({ confirmations = confirmation({}) })
+
+            ngx.say(login_with("plain", doctype .. response(sign_doc(body))))
+            ngx.say(login_with("plain", doctype .. sign_doc(response(body))))
+            -- and the same documents without the prologue, which carry no
+            -- Recipient of their own
+            ngx.say(login_with("plain", response(sign_doc(body))))
+        }
+    }
+--- response_body
+400 nil
+400 nil
+401 nil
+--- error_log eval
+[qr/parse post from IdP: document carries a document type declaration/,
+qr/offers no subject confirmation this SP can satisfy/]
+
+
+=== TEST 27: a response answering another request is refused
 --- config
     location /t {
         content_by_lua_block {
@@ -616,7 +925,7 @@ offers no subject confirmation this SP can satisfy
 response from IdP answers request ID_some-other-request
 
 
-=== TEST 21: a confirmation answering another request is refused
+=== TEST 28: a confirmation answering another request is refused
 --- config
     location /t {
         content_by_lua_block {
@@ -633,7 +942,7 @@ response from IdP answers request ID_some-other-request
 offers no subject confirmation this SP can satisfy
 
 
-=== TEST 22: a response answering this SP's own request is accepted
+=== TEST 29: a response answering this SP's own request is accepted
 --- config
     location /t {
         content_by_lua_block {
@@ -648,7 +957,41 @@ offers no subject confirmation this SP can satisfy
 302 /
 
 
-=== TEST 23: an assertion is good for one login
+=== TEST 30: a confirmation naming no request keeps working
+--- config
+    location /t {
+        content_by_lua_block {
+            -- naming one is what the profile asks of an IdP answering a
+            -- request, so an IdP that leaves it out is already out of spec.
+            -- The binding is worth what that IdP sends and no more.
+            ngx.say(login_with("plain", saml_response({
+                confirmations = confirmation({ recipient = ACS }),
+            })))
+        }
+    }
+--- response_body
+302 /
+
+
+=== TEST 31: a session minted before the binding starts the login again
+--- config
+    location /t {
+        content_by_lua_block {
+            -- nothing to compare the assertion against, and the login is
+            -- genuinely this user's, so send them back to the IdP for one
+            -- that is remembered
+            ngx.say(login_with_legacy("plain", saml_response({
+                confirmations = confirmation({ recipient = ACS, in_response_to = "ID_earlier" }),
+            })))
+        }
+    }
+--- response_body
+302 http://127.0.0.1:1984/idp
+--- error_log
+session carries no request id, starting the login again
+
+
+=== TEST 32: an assertion is good for one login
 --- config
     location /t {
         content_by_lua_block {
@@ -664,7 +1007,7 @@ offers no subject confirmation this SP can satisfy
 assertion a1 has been presented already
 
 
-=== TEST 24: a second assertion of its own is accepted
+=== TEST 33: a second assertion of its own is accepted
 --- config
     location /t {
         content_by_lua_block {
@@ -677,7 +1020,7 @@ assertion a1 has been presented already
 302 /
 
 
-=== TEST 25: an assertion is remembered for as long as it is usable
+=== TEST 34: an assertion is remembered for as long as it is usable
 --- config
     location /t {
         content_by_lua_block {

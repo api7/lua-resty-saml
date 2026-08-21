@@ -35,6 +35,9 @@ _EOC_
     lua_package_path '$pwd/lua/?.lua;$pwd/deps/share/lua/5.1/?.lua;$pwd/t/?.lua;;';
     lua_package_cpath '$pwd/?.so;$pwd/deps/lib/lua/5.1/?.so;;';
 
+    # blocks driving it flush it first: a zone of the same name and size is
+    # reused across a reload, so entries otherwise outlive the block that made
+    # them under TEST_NGINX_USE_HUP=1
     lua_shared_dict saml_replay 1m;
 
     init_by_lua_block {
@@ -995,6 +998,7 @@ session carries no request id, starting the login again
 --- config
     location /t {
         content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
             local xml = saml_response({ conditions = conditions({ not_on_or_after = at(600) }) })
             ngx.say(login_with("replay", xml))
             ngx.say(login_with("replay", xml))
@@ -1011,6 +1015,7 @@ assertion a1 has been presented already
 --- config
     location /t {
         content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
             ngx.say(login_with("replay", saml_response({ id = "a1" })))
             ngx.say(login_with("replay", saml_response({ id = "a2" })))
         }
@@ -1024,6 +1029,7 @@ assertion a1 has been presented already
 --- config
     location /t {
         content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
             ngx.say(login_with("replay", saml_response({
                 conditions = conditions({ not_on_or_after = at(600) }),
             })))

@@ -14,6 +14,11 @@ add_block_preprocessor(sub {
 
     if ((!defined $block->error_log) && (!defined $block->no_error_log)) {
         $block->set_value("no_error_log", "[error]");
+    } elsif (!defined $block->no_error_log) {
+        # a block naming the error it expects gets no other assertion about the
+        # log, so a block that also drives a success asserts nothing about that
+        # half. This is the part of it that can be said generically.
+        $block->set_value("no_error_log", "[crit]\n[alert]\n[emerg]");
     }
 
     if (!defined $block->request) {
@@ -157,9 +162,10 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
             spec = spec or {}
             local data = ""
             if spec.data ~= false then
-                data = string.format('<saml:SubjectConfirmationData%s%s%s/>',
+                data = string.format('<saml:SubjectConfirmationData%s%s%s%s/>',
                     attr("Recipient", spec.recipient), attr("NotBefore", spec.not_before),
-                    attr("NotOnOrAfter", spec.not_on_or_after))
+                    attr("NotOnOrAfter", spec.not_on_or_after),
+                    attr("InResponseTo", spec.in_response_to))
             end
             return string.format('<saml:SubjectConfirmation Method="%s">%s</saml:SubjectConfirmation>',
                 spec.method or BEARER, data)
@@ -189,17 +195,31 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
                 authn_statement(spec.session_expires))
         end
 
-        function response(body, destination)
+        function response(body, destination, in_response_to)
             return string.format('<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ' ..
-                'xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="resp-1" Version="2.0"%s ' ..
+                'xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="resp-1" Version="2.0"%s%s ' ..
                 'IssueInstant="2026-07-21T00:00:00Z"><saml:Issuer>%s</saml:Issuer>' ..
                 '<samlp:Status><samlp:StatusCode Value="%s"/></samlp:Status>%s</samlp:Response>',
-                attr("Destination", destination), IDP, SUCCESS, body)
+                attr("Destination", destination), attr("InResponseTo", in_response_to),
+                IDP, SUCCESS, body)
         end
 
         -- only the assertion is signed, the shape an IdP sends by default
-        function saml_response(spec, destination)
-            return response(sign_doc(assertion(spec)), destination)
+        function saml_response(spec, destination, in_response_to)
+            return response(sign_doc(assertion(spec)), destination, in_response_to)
+        end
+
+        -- the ID of the AuthnRequest the SP just issued, read back out of the
+        -- redirect it sent the browser
+        function authn_request_id(location)
+            local args = {}
+            for k, v in location:gmatch("([^?&=]+)=([^&]*)") do
+                args[k] = ngx.unescape_uri(v)
+            end
+            local cert = assert(saml.key_read_memory(CERT_PEM, saml.KeyDataFormatCertPem))
+            local doc = assert(saml.binding_redirect_parse("SAMLRequest", args,
+                function(_) return cert end))
+            return saml.doc_id(doc)
         end
 
         function callback_headers(name, cookie, extra)
@@ -225,6 +245,12 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
             if type(cookie) == "table" then cookie = cookie[1] end
             local state = res.headers["Location"]:match("RelayState=([^&]+)")
 
+            -- a response that has to name the request gets built once the SP
+            -- has issued one
+            if type(xml) == "function" then
+                xml = xml(authn_request_id(res.headers["Location"]))
+            end
+
             res, err = httpc:request_uri(base .. "/acs", {
                 method = "POST",
                 body = "SAMLResponse=" .. ngx.escape_uri(saml.base64_encode(xml)) ..
@@ -233,6 +259,26 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
             })
             if not res then return "callback request: " .. err end
             return res.status .. " " .. tostring(res.headers["Location"])
+        end
+
+        -- hand a response to a session the old code would have left behind
+        function login_with_legacy(name, xml)
+            local httpc = require("resty.http").new()
+            local base = "http://127.0.0.1:1984"
+
+            local res = assert(httpc:request_uri(base .. "/legacy", {
+                headers = { ["X-Test-SP"] = name },
+            }))
+            local cookie = res.headers["Set-Cookie"]
+            if type(cookie) == "table" then cookie = cookie[1] end
+
+            res = assert(httpc:request_uri(base .. "/acs", {
+                method = "POST",
+                body = "SAMLResponse=" .. ngx.escape_uri(saml.base64_encode(xml)) ..
+                    "&RelayState=legacy-state",
+                headers = callback_headers(name, cookie),
+            }))
+            return res.status .. " " .. (res.headers["Location"] or ""):match("^[^?]*")
         end
 
         -- log in, then ask the app again carrying the session the callback
@@ -275,6 +321,19 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
 
     server {
         listen 1984;
+
+        # a login in progress with no record of the request that started it,
+        # the shape a session minted before the binding existed has
+        location /legacy {
+            content_by_lua_block {
+                local name = ngx.var.http_x_test_sp or "plain"
+                local sess = require("resty.session").start(sp(name).session_config)
+                sess:set("saml_state", "legacy-state")
+                sess:set("request_uri", "/")
+                sess:save()
+                ngx.exit(200)
+            }
+        }
 
         location / {
             access_by_lua_block {
@@ -848,3 +907,82 @@ qr/offers no subject confirmation this SP can satisfy/]
 --- error_log eval
 [qr/parse post from IdP: document carries a document type declaration/,
 qr/offers no subject confirmation this SP can satisfy/]
+
+
+=== TEST 27: a response answering another request is refused
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.say(login_with("plain", saml_response({}, nil, "ID_some-other-request")))
+        }
+    }
+--- response_body
+401 nil
+--- error_log
+response from IdP answers request ID_some-other-request
+
+
+=== TEST 28: a confirmation answering another request is refused
+--- config
+    location /t {
+        content_by_lua_block {
+            -- inside the signature, so this is the binding an attacker replaying
+            -- a captured assertion cannot rewrite
+            ngx.say(login_with("plain", saml_response({
+                confirmations = confirmation({ recipient = ACS, in_response_to = "ID_some-other-request" }),
+            })))
+        }
+    }
+--- response_body
+401 nil
+--- error_log
+offers no subject confirmation this SP can satisfy
+
+
+=== TEST 29: a response answering this SP's own request is accepted
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.say(login_with("plain", function(request_id)
+                return saml_response({
+                    confirmations = confirmation({ recipient = ACS, in_response_to = request_id }),
+                }, ACS, request_id)
+            end))
+        }
+    }
+--- response_body
+302 /
+
+
+=== TEST 30: a confirmation naming no request keeps working
+--- config
+    location /t {
+        content_by_lua_block {
+            -- naming one is what the profile asks of an IdP answering a
+            -- request, so an IdP that leaves it out is already out of spec.
+            -- The binding is worth what that IdP sends and no more.
+            ngx.say(login_with("plain", saml_response({
+                confirmations = confirmation({ recipient = ACS }),
+            })))
+        }
+    }
+--- response_body
+302 /
+
+
+=== TEST 31: a session minted before the binding starts the login again
+--- config
+    location /t {
+        content_by_lua_block {
+            -- nothing to compare the assertion against, and the login is
+            -- genuinely this user's, so send them back to the IdP for one
+            -- that is remembered
+            ngx.say(login_with_legacy("plain", saml_response({
+                confirmations = confirmation({ recipient = ACS, in_response_to = "ID_earlier" }),
+            })))
+        }
+    }
+--- response_body
+302 http://127.0.0.1:1984/idp
+--- error_log
+session carries no request id, starting the login again

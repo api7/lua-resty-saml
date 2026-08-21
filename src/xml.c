@@ -591,6 +591,19 @@ int saml_doc_destination(xmlDoc* doc, xmlChar** destination) {
 }
 
 
+// What the root message answers, or NULL when it answers nothing. Reported
+// separately from a read that failed, for the same reason as Destination.
+int saml_doc_in_response_to(xmlDoc* doc, xmlChar** in_response_to) {
+  *in_response_to = NULL;
+
+  xmlNode* root = xmlDocGetRootElement(doc);
+  if (root == NULL) {
+    return 0;
+  }
+  return read_attr(root, "InResponseTo", in_response_to);
+}
+
+
 void saml_assertions_free(saml_assertion_t* assertions, size_t assertions_len) {
   for (size_t i = 0; i < assertions_len; i++) {
     saml_assertion_t* a = assertions + i;

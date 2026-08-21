@@ -158,13 +158,13 @@ local AUTHN_REQUEST = [[
 </samlp:AuthnRequest>
 ]]
 
-local function authn_request(opts)
+local function authn_request(opts, request_id)
     return interp(AUTHN_REQUEST, {
         acs_url = sp_acs_url(opts),
         destination = opts.idp_uri,
         issue_instant = os.date("!%Y-%m-%dT%TZ"),
         issuer = opts.sp_issuer,
-        uuid = generate_saml_id(),
+        uuid = request_id,
         auth_protocol_binding_method = opts.auth_protocol_binding_method,
     })
 end
@@ -189,7 +189,10 @@ local function logout_request(opts, name_id, session_index)
     })
 end
 
-local function login(self, opts)
+-- request_uri is where to return once the IdP answers. It defaults to what is
+-- being asked for, and is passed in when a login is restarted from somewhere
+-- else, where ngx.var.request_uri is that somewhere else.
+local function login(self, opts, request_uri)
     local sess = session.start(self.session_config)
 
     local authenticated = sess:get("authenticated")
@@ -213,14 +216,18 @@ local function login(self, opts)
     end
 
     local state = uuid.generate_v4()
-    local request_uri = ngx.var.request_uri
+    request_uri = request_uri or ngx.var.request_uri
+    -- kept so the callback can tell the answer to this request from the answer
+    -- to some other one
+    local request_id = generate_saml_id()
 
     sess:set("saml_state", state)
+    sess:set("saml_request_id", request_id)
     sess:set("request_uri", request_uri)
     sess:save()
 
     local query_str, err = create_redirect(self.sign_key, {
-        SAMLRequest = authn_request(opts),
+        SAMLRequest = authn_request(opts, request_id),
         SigAlg = RSA_SHA_512_HREF,
         RelayState = state,
     })
@@ -366,13 +373,22 @@ end
 -- The assertion may be presented to whoever the Recipient names, for as long as
 -- the confirmation data allows. Several confirmations can be offered and any one
 -- of them being satisfiable is enough.
-local function confirmation_ok(confirmation, acs_url, now, skew)
+local function confirmation_ok(confirmation, expected, now, skew)
     -- Recipient is the only thing a confirmation says about where the assertion
     -- may be presented, so it has to be there. An absent one, an empty
     -- SubjectConfirmationData, and one carrying nothing but conditions that
     -- happen to hold all say the same nothing, and any of them would otherwise
     -- answer in place of a sibling that binds the assertion somewhere else.
-    if confirmation.recipient ~= acs_url then
+    if confirmation.recipient ~= expected.acs_url then
+        return false
+    end
+    -- Checked when the IdP names a request, and not demanded. Naming one is
+    -- what profile 4.1.4.2 asks of an IdP answering an AuthnRequest, so an IdP
+    -- that leaves it out is already out of spec, and refusing that trades a
+    -- working login for protection against somebody else's misconfiguration.
+    -- Nothing an attacker sends produces the shape: the value sits inside the
+    -- signature, so it cannot be stripped from a captured assertion.
+    if confirmation.in_response_to and confirmation.in_response_to ~= expected.request_id then
         return false
     end
     return (time_bounds_ok(confirmation.not_before, confirmation.not_on_or_after, now, skew))
@@ -381,7 +397,7 @@ end
 
 -- Every top-level assertion the verified signature left in the document is one
 -- the readers draw identity from, so every one of them has to hold up.
-local function assertions_acceptable(opts, assertions, acs_url, now)
+local function assertions_acceptable(opts, assertions, expected, now)
     local skew = opts.clock_skew or DEFAULT_CLOCK_SKEW
     local accepted = opts.sp_audiences or { opts.sp_issuer }
 
@@ -412,7 +428,7 @@ local function assertions_acceptable(opts, assertions, acs_url, now)
         if #confirmations > 0 then
             local satisfiable = false
             for _, confirmation in ipairs(confirmations) do
-                if confirmation_ok(confirmation, acs_url, now, skew) then
+                if confirmation_ok(confirmation, expected, now, skew) then
                     satisfiable = true
                     break
                 end
@@ -496,6 +512,16 @@ local function login_callback(self, opts)
 
     local request_uri = sess:get("request_uri")
 
+    -- A session minted before this SP kept the ID of the request it issued has
+    -- nothing for the assertion to name, and refusing dead-ends a login that is
+    -- genuinely this user's. Starting over gets a request that is remembered,
+    -- and cannot repeat, since the session it mints carries one.
+    local request_id = sess:get("saml_request_id")
+    if not request_id then
+        ngx.log(ngx.WARN, "session carries no request id, starting the login again")
+        return login(self, opts, request_uri)
+    end
+
     local method = ngx.req.get_method()
     local doc, args, err
     if method == "POST" then
@@ -523,7 +549,23 @@ local function login_callback(self, opts)
         ngx.exit(ngx.HTTP_UNAUTHORIZED)
     end
 
-    local acs_url = sp_acs_url(opts)
+    local expected = {
+        acs_url = sp_acs_url(opts),
+        request_id = request_id,
+    }
+
+    -- the Response is often left unsigned, so this only catches a stray answer;
+    -- the binding that holds is the one inside the signed assertion below
+    local in_response_to, in_response_to_err = saml.doc_in_response_to(doc)
+    if in_response_to_err then
+        ngx.log(ngx.ERR, "could not read what the response from IdP answers: ",
+            in_response_to_err)
+        ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
+    end
+    if in_response_to and in_response_to ~= expected.request_id then
+        ngx.log(ngx.ERR, "response from IdP answers request ", loggable(in_response_to))
+        ngx.exit(ngx.HTTP_UNAUTHORIZED)
+    end
 
     local destination, destination_err = saml.doc_destination(doc)
     if destination_err then
@@ -531,7 +573,7 @@ local function login_callback(self, opts)
             destination_err)
         ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
     end
-    if destination and destination ~= acs_url then
+    if destination and destination ~= expected.acs_url then
         ngx.log(ngx.ERR, "response from IdP is addressed to ", loggable(destination))
         ngx.exit(ngx.HTTP_UNAUTHORIZED)
     end
@@ -542,7 +584,7 @@ local function login_callback(self, opts)
         ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
     end
 
-    local acceptable, reason = assertions_acceptable(opts, assertions, acs_url, ngx.time())
+    local acceptable, reason = assertions_acceptable(opts, assertions, expected, ngx.time())
     if not acceptable then
         ngx.log(ngx.ERR, "response from IdP rejected: ", loggable(reason))
         ngx.exit(ngx.HTTP_UNAUTHORIZED)
@@ -591,6 +633,7 @@ local function login_callback(self, opts)
 
     -- clear temporary authentication state no longer needed after successful login
     sess:set("saml_state", nil)
+    sess:set("saml_request_id", nil)
     sess:set("request_uri", nil)
     sess:save()
 

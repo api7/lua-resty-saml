@@ -84,6 +84,36 @@ local saml = resty_saml.new(opts)
 | `sp_audiences`      | array of strings       | `{ sp_issuer }`      | Audiences this SP answers to. An assertion carrying an `AudienceRestriction` has to name one of them; an assertion carrying none is unrestricted.       |
 | `clock_skew`      | number       | `60`      | Seconds of clock difference tolerated against the IdP when weighing `NotBefore` and `NotOnOrAfter`.       |
 
+#### Binding a response to the request
+
+An ID is minted for every `AuthnRequest` this SP sends and kept on the session as
+`saml_request_id`. On the way back, a `SubjectConfirmationData` naming a different
+request refuses the login, so an assertion captured from one login cannot be
+presented in another. `Response/@InResponseTo` is weighed the same way,
+though what it is worth depends on what the IdP signed: an IdP signing the whole
+`Response` covers it, while one signing only the assertion, the common shape, leaves
+it outside the signature, where the party replaying an assertion deletes it. Rely on
+the copy inside the assertion, and read this one as catching a misdirected answer.
+
+That guarantee is worth what the IdP sends. Profile 4.1.4.2 asks an IdP answering an
+`AuthnRequest` to name it, and every mainstream IdP does, but an IdP that leaves
+`InResponseTo` out, or sends no `SubjectConfirmation` at all, keeps working and gets
+no binding. Refusing it would trade a working login for protection against another
+party's misconfiguration, and no attacker can produce the shape: the value sits
+inside the signature, so it cannot be stripped from a captured assertion.
+
+One note for upgrading. A session minted before this SP kept the ID has nothing for
+the assertion to name, so the login is started again rather than refused. The window
+lasts as long as an `AuthnRequest` is outstanding across the upgrade.
+
+#### Seeding the worker
+
+Request IDs and `RelayState` both come from `resty.jit-uuid`, which is seeded when
+this module is first loaded, from the clock and the process ID. Loading `resty.saml`
+from `init_by_lua` therefore seeds once in the master, and every worker forked after
+it inherits that same sequence. Require this module from `init_worker_by_lua`, or
+call `uuid.seed()` there yourself.
+
 #### saml:authenticate()
 
 **syntax:** *data = saml:authenticate()*

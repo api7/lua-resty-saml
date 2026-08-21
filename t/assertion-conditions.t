@@ -35,6 +35,11 @@ _EOC_
     lua_package_path '$pwd/lua/?.lua;$pwd/deps/share/lua/5.1/?.lua;$pwd/t/?.lua;;';
     lua_package_cpath '$pwd/?.so;$pwd/deps/lib/lua/5.1/?.so;;';
 
+    # blocks driving it flush it first: a zone of the same name and size is
+    # reused across a reload, so entries otherwise outlive the block that made
+    # them under TEST_NGINX_USE_HUP=1
+    lua_shared_dict saml_replay 1m;
+
     init_by_lua_block {
         saml = require "saml"
         local err = saml.init({ debug = true, data_dir = os.getenv("SAML_DATA_DIR") })
@@ -100,6 +105,7 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
             skew = { clock_skew = 300 },
             audiences = { sp_audiences = { "https://sp.example.com/metadata" } },
             acs = { sp_acs_url = "http://127.0.0.1:1984/acs" },
+            replay = { replay_dict = "saml_replay" },
         }
         SPS = {}
 
@@ -986,3 +992,59 @@ offers no subject confirmation this SP can satisfy
 302 http://127.0.0.1:1984/idp
 --- error_log
 session carries no request id, starting the login again
+
+
+=== TEST 32: an assertion is good for one login
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            local xml = saml_response({ conditions = conditions({ not_on_or_after = at(600) }) })
+            ngx.say(login_with("replay", xml))
+            ngx.say(login_with("replay", xml))
+        }
+    }
+--- response_body
+302 /
+401 nil
+--- error_log
+assertion a1 has been presented already
+
+
+=== TEST 33: a second assertion of its own is accepted
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            ngx.say(login_with("replay", saml_response({ id = "a1" })))
+            ngx.say(login_with("replay", saml_response({ id = "a2" })))
+        }
+    }
+--- response_body
+302 /
+302 /
+
+
+=== TEST 34: an assertion is remembered for as long as it is usable
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            ngx.say(login_with("replay", saml_response({
+                conditions = conditions({ not_on_or_after = at(600) }),
+            })))
+            -- the window plus the skew allowance, which is when it stops being
+            -- accepted and so stops being worth remembering
+            local ttl = ngx.shared.saml_replay:ttl("sp|a1")
+            ngx.say("tracked: ", ttl > 600 and ttl <= 660)
+
+            ngx.say(login_with("replay", saml_response({ id = "a2" })))
+            local default = ngx.shared.saml_replay:ttl("sp|a2")
+            ngx.say("default: ", default > 590 and default <= 600)
+        }
+    }
+--- response_body
+302 /
+tracked: true
+302 /
+default: true

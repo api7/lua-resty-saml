@@ -504,6 +504,14 @@ local function issuers_allowed(allowed, issuers)
     return true
 end
 
+-- An ID is unique only within the IdP that minted it, and idp_issuers takes a
+-- list, so the two travel together. The SP name keeps instances sharing one
+-- dict apart.
+local function replay_key(opts, assertion)
+    return tostring(opts.sp_issuer) .. "|" .. (assertion.issuer or "") .. "|" .. assertion.id
+end
+
+
 -- A bearer assertion is good for one login. Nothing above stops the same one
 -- being presented again inside its validity window, so its ID is kept until it
 -- expires and a second presentation is refused.
@@ -531,8 +539,7 @@ local function assertions_unused(dict, opts, assertions, now)
             ttl = 1
         end
 
-        -- an SP name in the key so instances sharing one dict stay apart
-        local key = tostring(opts.sp_issuer) .. "|" .. assertion.id
+        local key = replay_key(opts, assertion)
         local added, err, forcible = dict:add(key, true, ttl)
         if not added then
             if err == "exists" then

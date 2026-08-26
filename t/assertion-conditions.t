@@ -35,9 +35,9 @@ _EOC_
     lua_package_path '$pwd/lua/?.lua;$pwd/deps/share/lua/5.1/?.lua;$pwd/t/?.lua;;';
     lua_package_cpath '$pwd/?.so;$pwd/deps/lib/lua/5.1/?.so;;';
 
-    # blocks driving it flush it first: a zone of the same name and size is
-    # reused across a reload, so entries otherwise outlive the block that made
-    # them under TEST_NGINX_USE_HUP=1
+    # a zone of the same name and size is reused across a reload, so entries
+    # outlive the block that made them under TEST_NGINX_USE_HUP=1. Blocks name
+    # their own assertions to stay apart, and flush as well
     lua_shared_dict saml_replay 1m;
 
     init_by_lua_block {
@@ -196,7 +196,7 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
                 'ID="%s" Version="2.0" IssueInstant="2026-07-21T00:00:00Z">' ..
                 '<saml:Issuer>%s</saml:Issuer>' ..
                 '<saml:Subject><saml:NameID>%s</saml:NameID>%s</saml:Subject>%s%s</saml:Assertion>',
-                spec.id or "a1", IDP, spec.name_id or "signed\@example.com",
+                spec.id or "a1", spec.issuer or IDP, spec.name_id or "signed\@example.com",
                 spec.confirmations or "", spec.conditions or "",
                 authn_statement(spec.session_expires))
         end
@@ -226,6 +226,12 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
             local doc = assert(saml.binding_redirect_parse("SAMLRequest", args,
                 function(_) return cert end))
             return saml.doc_id(doc)
+        end
+
+        -- the module owns this layout; naming it once here keeps a change to
+        -- the scheme from surfacing as a comparison against nil
+        function replay_key(id, issuer)
+            return "sp|" .. (issuer or IDP) .. "|" .. id
         end
 
         function callback_headers(name, cookie, extra)
@@ -999,7 +1005,9 @@ session carries no request id, starting the login again
     location /t {
         content_by_lua_block {
             ngx.shared.saml_replay:flush_all()
-            local xml = saml_response({ conditions = conditions({ not_on_or_after = at(600) }) })
+            local xml = saml_response({
+                id = "once", conditions = conditions({ not_on_or_after = at(600) }),
+            })
             ngx.say(login_with("replay", xml))
             ngx.say(login_with("replay", xml))
         }
@@ -1008,7 +1016,7 @@ session carries no request id, starting the login again
 302 /
 401 nil
 --- error_log
-assertion a1 has been presented already
+assertion once has been presented already
 
 
 === TEST 33: a second assertion of its own is accepted
@@ -1016,8 +1024,8 @@ assertion a1 has been presented already
     location /t {
         content_by_lua_block {
             ngx.shared.saml_replay:flush_all()
-            ngx.say(login_with("replay", saml_response({ id = "a1" })))
-            ngx.say(login_with("replay", saml_response({ id = "a2" })))
+            ngx.say(login_with("replay", saml_response({ id = "first" })))
+            ngx.say(login_with("replay", saml_response({ id = "second" })))
         }
     }
 --- response_body
@@ -1031,15 +1039,15 @@ assertion a1 has been presented already
         content_by_lua_block {
             ngx.shared.saml_replay:flush_all()
             ngx.say(login_with("replay", saml_response({
-                conditions = conditions({ not_on_or_after = at(600) }),
+                id = "bounded", conditions = conditions({ not_on_or_after = at(600) }),
             })))
             -- the window plus the skew allowance, which is when it stops being
             -- accepted and so stops being worth remembering
-            local ttl = ngx.shared.saml_replay:ttl("sp|a1")
+            local ttl = ngx.shared.saml_replay:ttl(replay_key("bounded"))
             ngx.say("tracked: ", ttl > 600 and ttl <= 660)
 
-            ngx.say(login_with("replay", saml_response({ id = "a2" })))
-            local default = ngx.shared.saml_replay:ttl("sp|a2")
+            ngx.say(login_with("replay", saml_response({ id = "unbounded" })))
+            local default = ngx.shared.saml_replay:ttl(replay_key("unbounded"))
             ngx.say("default: ", default > 590 and default <= 600)
         }
     }
@@ -1048,3 +1056,21 @@ assertion a1 has been presented already
 tracked: true
 302 /
 default: true
+
+
+=== TEST 35: two IdPs may mint the same assertion ID
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            -- an ID is unique only within the IdP that issued it, so sharing
+            -- one is not a replay
+            ngx.say(login_with("replay", saml_response({ id = "shared" })))
+            ngx.say(login_with("replay", saml_response({
+                id = "shared", issuer = "https://second-idp.example.com",
+            })))
+        }
+    }
+--- response_body
+302 /
+302 /

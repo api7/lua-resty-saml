@@ -122,12 +122,15 @@ is what carries the weight, since it travels in the user's own session, and this
 option is the defence for the deployments that binding leaves uncovered: the ones
 whose IdP sends no `InResponseTo`.
 
-**Size the zone for what it holds.** One entry per accepted login, held for the
-assertion's remaining lifetime. An SP taking ten logins a second against an IdP
-issuing ten-minute assertions holds around six thousand of them at once, so `1m` is
-too small for that and a busy deployment wants more. A zone with no room leaves the
-login untracked and logs an error naming it, rather than evicting an entry that is
-still protecting somebody else.
+**Size the zone for what it holds.** One entry per assertion accepted, held for as
+long as that assertion could still be used. A response normally carries one, so an SP
+taking ten logins a second against an IdP issuing ten-minute assertions holds around
+six thousand entries at once: `1m` is too small for that and a busy deployment wants
+more. A zone with no room leaves that assertion untracked and logs an error naming
+the assertion and the zone, rather than evicting an entry that is still protecting
+somebody else. A response carrying several assertions can end up partly tracked,
+which is the safe direction: a later replay still collides on whichever of them was
+recorded.
 
 **Two things it deliberately does not do.** An assertion carrying `<saml:OneTimeUse/>`
 is still refused outright, so an IdP asking for exactly this protection cannot log in

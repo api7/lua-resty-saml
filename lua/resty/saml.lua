@@ -558,11 +558,10 @@ end
 --
 -- Called at the last gate rather than beside the checks, so a login the rest of
 -- the callback still refuses leaves the assertion unspent. A dict with no room
--- leaves this assertion untracked rather than evicting one
--- that is still protecting somebody else's login, which is what add would do on
--- its own: the entry it takes belongs to another user, the login it stops
--- protecting is theirs, and the warning is reported against whoever happened to
--- need the space.
+-- leaves this assertion untracked rather than evicting one that is still
+-- protecting somebody else's login, which is what add would do on its own: the
+-- entry it takes belongs to another user, the login it stops protecting is
+-- theirs, and the warning is reported against whoever needed the space.
 local function spend_assertions(dict, opts, assertions, now)
     local skew = opts.clock_skew or DEFAULT_CLOCK_SKEW
     local spent = {}

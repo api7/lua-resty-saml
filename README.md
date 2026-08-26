@@ -83,8 +83,8 @@ local saml = resty_saml.new(opts)
 | `sp_acs_url`      | string       | built from the request       | Absolute URL of this SP's assertion consumer service. It is announced to the IdP, every `SubjectConfirmationData/@Recipient` has to name it, and a `Destination` has to name it on a response carrying one. Unset, it is assembled from the request's scheme and host, which is only as trustworthy as whatever sits in front: set it wherever the ingress does not normalise `Forwarded` and `X-Forwarded-*`, or terminates TLS without setting `X-Forwarded-Proto`.       |
 | `sp_audiences`      | array of strings       | `{ sp_issuer }`      | Audiences this SP answers to. An assertion carrying an `AudienceRestriction` has to name one of them; an assertion carrying none is unrestricted.       |
 | `clock_skew`      | number       | `60`      | Seconds of clock difference tolerated against the IdP when weighing `NotBefore` and `NotOnOrAfter`.       |
-| `replay_dict`      | string       | None      | Name of an `lua_shared_dict` in which to remember the assertions already presented, so none is accepted twice. Unset leaves them untracked.       |
-| `replay_ttl`      | number       | `600`      | Seconds to remember an assertion that names no `NotOnOrAfter` of its own. One that names it is remembered until it expires.       |
+| `replay_dict`      | string       | None      | Name of an `lua_shared_dict` in which to remember the assertions this instance has already accepted, so it accepts none of them twice. Unset leaves them untracked. See [Remembering assertions](#remembering-assertions) for what the zone has to hold and how far the guarantee reaches.       |
+| `replay_ttl`      | number       | `600`      | Seconds to remember an assertion that names no `NotOnOrAfter` anywhere, on its `Conditions` or on any subject confirmation. One that names it is remembered until that moment plus `clock_skew`, capped at a day.       |
 
 #### Binding a response to the request
 
@@ -107,6 +107,34 @@ inside the signature, so it cannot be stripped from a captured assertion.
 One note for upgrading. A session minted before this SP kept the ID has nothing for
 the assertion to name, so the login is started again rather than refused. The window
 lasts as long as an `AuthnRequest` is outstanding across the upgrade.
+
+#### Remembering assertions
+
+Set `replay_dict` and every assertion this instance accepts is remembered until it
+could no longer be used, so presenting the same one again is refused. Leave it unset
+and assertions go untracked, which is what happened before the option existed.
+
+**The guarantee is per instance.** An `lua_shared_dict` is shared between the workers
+of one gateway and nowhere else, so a captured assertion replayed through a load
+balancer lands on a replica that has never seen it and is accepted. Across replicas
+the binding in [Binding a response to the request](#binding-a-response-to-the-request)
+is what carries the weight, since it travels in the user's own session, and this
+option is the defence for the deployments that binding leaves uncovered: the ones
+whose IdP sends no `InResponseTo`.
+
+**Size the zone for what it holds.** One entry per accepted login, held for the
+assertion's remaining lifetime. An SP taking ten logins a second against an IdP
+issuing ten-minute assertions holds around six thousand of them at once, so `1m` is
+too small for that and a busy deployment wants more. A zone with no room leaves the
+login untracked and logs an error naming it, rather than evicting an entry that is
+still protecting somebody else.
+
+**Two things it deliberately does not do.** An assertion carrying `<saml:OneTimeUse/>`
+is still refused outright, so an IdP asking for exactly this protection cannot log in
+even with the option on; that is tracked separately and the two do not meet yet. And
+re-submitting a response that already logged in is refused, which is what a browser
+does when it loses the redirect that ends a login. Returning to the application starts
+a fresh login, and the IdP will not ask for a password again.
 
 #### Seeding the worker
 

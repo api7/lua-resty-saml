@@ -556,13 +556,16 @@ end
 -- being presented again inside its validity window, so its ID is remembered for
 -- as long as it could still be used and a second presentation is refused.
 --
--- A dict with no room leaves this assertion untracked rather than evicting one
+-- Called at the last gate rather than beside the checks, so a login the rest of
+-- the callback still refuses leaves the assertion unspent. A dict with no room
+-- leaves this assertion untracked rather than evicting one
 -- that is still protecting somebody else's login, which is what add would do on
 -- its own: the entry it takes belongs to another user, the login it stops
 -- protecting is theirs, and the warning is reported against whoever happened to
 -- need the space.
-local function assertions_unused(dict, opts, assertions, now)
+local function spend_assertions(dict, opts, assertions, now)
     local skew = opts.clock_skew or DEFAULT_CLOCK_SKEW
+    local spent = {}
 
     for _, assertion in ipairs(assertions) do
         if not assertion.id then
@@ -585,10 +588,16 @@ local function assertions_unused(dict, opts, assertions, now)
 
         local key = replay_key(opts, assertion)
         local added, add_err = dict:safe_add(key, true, ttl)
-        if not added then
-            if add_err == "exists" then
-                return false, "assertion " .. assertion.id .. " has been presented already"
+        if added then
+            spent[#spent + 1] = key
+        elseif add_err == "exists" then
+            -- this response authenticates nobody, so the assertions already
+            -- taken from it are handed back rather than left spent
+            for _, taken in ipairs(spent) do
+                dict:delete(taken)
             end
+            return false, "assertion " .. assertion.id .. " has been presented already"
+        else
             ngx.log(ngx.ERR, "could not remember assertion ", loggable(assertion.id), ": ",
                 add_err, ", this login is not covered by replay tracking")
         end
@@ -688,14 +697,6 @@ local function login_callback(self, opts)
         ngx.exit(ngx.HTTP_UNAUTHORIZED)
     end
 
-    if self.replay_dict then
-        local unused, used_reason = assertions_unused(self.replay_dict, opts, assertions, now)
-        if not unused then
-            ngx.log(ngx.ERR, "response from IdP rejected: ", loggable(used_reason))
-            ngx.exit(ngx.HTTP_UNAUTHORIZED)
-        end
-    end
-
     local issuer = saml.doc_issuer(doc)
     local attrs = saml.doc_attrs(doc)
     local name_id = saml.doc_name_id(doc)
@@ -729,6 +730,16 @@ local function login_callback(self, opts)
             os.date("!%Y-%m-%d %TZ", expires))
     end
 
+
+    -- the last gate: everything that can still refuse this login has run, so
+    -- the assertion is spent only where it actually authenticates somebody
+    if self.replay_dict then
+        local unused, used_reason = spend_assertions(self.replay_dict, opts, assertions, now)
+        if not unused then
+            ngx.log(ngx.ERR, "response from IdP rejected: ", loggable(used_reason))
+            ngx.exit(ngx.HTTP_UNAUTHORIZED)
+        end
+    end
 
     sess:set("authenticated", true)
     sess:set("name_id", name_id)

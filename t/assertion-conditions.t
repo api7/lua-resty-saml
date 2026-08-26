@@ -109,6 +109,10 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
             replay = { replay_dict = "saml_replay" },
             replay_short = { replay_dict = "saml_replay", replay_ttl = 90 },
             replay_full = { replay_dict = "saml_replay_full" },
+            replay_pinned = {
+                replay_dict = "saml_replay",
+                idp_issuers = { "https://elsewhere.example.com" },
+            },
         }
         SPS = {}
 
@@ -1183,3 +1187,51 @@ full: true
 302 /
 --- error_log
 this login is not covered by replay tracking
+
+
+=== TEST 41: a login refused after the checks leaves the assertion unspent
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            -- idp_issuers refuses this one below where the record used to be
+            -- written, so writing it early told the retry it was a replay
+            local xml = saml_response({ id = "unspent" })
+            ngx.say(login_with("replay_pinned", xml))
+            ngx.say("remembered: ", ngx.shared.saml_replay:get(replay_key("unspent")) ~= nil)
+            ngx.say(login_with("replay", xml))
+        }
+    }
+--- response_body
+401 nil
+remembered: false
+302 /
+--- error_log
+unexpected issuer in response from IdP
+
+
+=== TEST 42: a response refused part way spends none of its assertions
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            -- one signature over the whole Response, so it carries two
+            -- assertions and the reader draws identity from both
+            local spent = sign_doc(response(assertion({ id = "pair-b" })))
+            ngx.say(login_with("replay", spent))
+
+            local pair = sign_doc(response(
+                assertion({ id = "pair-a" }) .. assertion({ id = "pair-b" })))
+            ngx.say(login_with("replay", pair))
+            ngx.say("remembered: ", ngx.shared.saml_replay:get(replay_key("pair-a")) ~= nil)
+
+            ngx.say(login_with("replay", sign_doc(response(assertion({ id = "pair-a" })))))
+        }
+    }
+--- response_body
+302 /
+401 nil
+remembered: false
+302 /
+--- error_log
+assertion pair-b has been presented already

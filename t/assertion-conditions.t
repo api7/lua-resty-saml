@@ -1235,3 +1235,43 @@ remembered: false
 302 /
 --- error_log
 assertion pair-b has been presented already
+
+
+=== TEST 43: replay configuration is weighed when the SP is built
+--- config
+    location /t {
+        content_by_lua_block {
+            local resty_saml = require("resty.saml")
+            local function build(extra, drop)
+                local opts = {
+                    sp_issuer = "sp",
+                    idp_uri = "http://127.0.0.1:1984/idp",
+                    login_callback_uri = "/acs",
+                    sp_cert = CERT_PEM,
+                    sp_private_key = KEY_PEM,
+                    idp_cert = CERT_PEM,
+                    secret = "very-secret-key-that-is-32-byte!",
+                }
+                for k, v in pairs(extra) do opts[k] = v end
+                if drop then opts[drop] = nil end
+                local ok, err = pcall(resty_saml.new, opts)
+                return ok and "built" or err:gsub("^.-:%d+: ", "")
+            end
+
+            ngx.say(build({ replay_dict = true }))
+            ngx.say(build({ replay_dict = "no-such-dict" }))
+            ngx.say(build({ replay_dict = "saml_replay" }, "sp_issuer"))
+            -- zero means never expire to lua_shared_dict, and text is what a
+            -- YAML or environment config path hands over
+            ngx.say(build({ replay_dict = "saml_replay", replay_ttl = 0 }))
+            ngx.say(build({ replay_dict = "saml_replay", replay_ttl = "600" }))
+            ngx.say(build({ replay_dict = "saml_replay", replay_ttl = 90 }))
+        }
+    }
+--- response_body
+replay_dict must be the name of a lua_shared_dict
+no lua_shared_dict named no-such-dict
+sp_issuer must be a string to track assertions
+replay_ttl must be a positive number of seconds
+replay_ttl must be a positive number of seconds
+built

@@ -548,7 +548,7 @@ end
 -- list, so the two travel together. The SP name keeps instances sharing one
 -- dict apart.
 local function replay_key(opts, assertion)
-    return tostring(opts.sp_issuer) .. "|" .. (assertion.issuer or "") .. "|" .. assertion.id
+    return opts.sp_issuer .. "|" .. (assertion.issuer or "") .. "|" .. assertion.id
 end
 
 
@@ -917,9 +917,29 @@ function _M.new(opts)
     obj.idp_cert_func = function(doc) return idp_cert end
     obj.auth_protocol_binding_method = opts.auth_protocol_binding_method
     obj.idp_issuers = issuer_set(opts.idp_issuers)
-    if opts.replay_dict then
-        obj.replay_dict = assert(ngx.shared[opts.replay_dict],
-            "no lua_shared_dict named " .. opts.replay_dict)
+    -- read once, and raised rather than returned so a mistyped name names
+    -- itself. A message built as an argument to assert is built on every
+    -- successful call too, and a non-string one fails on the concatenation
+    -- rather than on the option.
+    if opts.replay_dict ~= nil then
+        if type(opts.replay_dict) ~= "string" then
+            error("replay_dict must be the name of a lua_shared_dict", 2)
+        end
+        obj.replay_dict = ngx.shared[opts.replay_dict]
+        if obj.replay_dict == nil then
+            error("no lua_shared_dict named " .. opts.replay_dict, 2)
+        end
+        -- it is half the key, and tostring would turn a missing one into the
+        -- literal nil that two deployments would then share
+        if type(opts.sp_issuer) ~= "string" then
+            error("sp_issuer must be a string to track assertions", 2)
+        end
+        -- zero means never expire to lua_shared_dict, and a number arriving
+        -- from YAML or the environment as text compares against nothing
+        if opts.replay_ttl ~= nil and
+            (type(opts.replay_ttl) ~= "number" or opts.replay_ttl < 1) then
+            error("replay_ttl must be a positive number of seconds", 2)
+        end
     end
     local cookie_secure, cookie_same_site
     if opts.auth_protocol_binding_method == "HTTP-POST" then

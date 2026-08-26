@@ -39,6 +39,7 @@ _EOC_
     # outlive the block that made them under TEST_NGINX_USE_HUP=1. Blocks name
     # their own assertions to stay apart, and flush as well
     lua_shared_dict saml_replay 1m;
+    lua_shared_dict saml_replay_full 32k;
 
     init_by_lua_block {
         saml = require "saml"
@@ -107,6 +108,7 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
             acs = { sp_acs_url = "http://127.0.0.1:1984/acs" },
             replay = { replay_dict = "saml_replay" },
             replay_short = { replay_dict = "saml_replay", replay_ttl = 90 },
+            replay_full = { replay_dict = "saml_replay_full" },
         }
         SPS = {}
 
@@ -1148,3 +1150,36 @@ configured: true
 --- response_body
 302 /
 capped: true
+
+
+=== TEST 40: a full dict leaves the login working and says so
+--- config
+    location /t {
+        content_by_lua_block {
+            local dict = ngx.shared.saml_replay_full
+            dict:flush_all()
+            dict:flush_expired()
+            local filler = string.rep("x", 256)
+            local i, ok, err = 0, true, nil
+            while ok do
+                ok, err = dict:safe_set("filler-" .. i, filler, 600)
+                if ok then i = i + 1 end
+                if i > 5000 then break end
+            end
+            local j = 0
+            while dict:safe_add("small-" .. j, true, 600) do
+                j = j + 1
+                if j > 5000 then break end
+            end
+            ngx.say("full: ", i > 0 and j > 0 and err == "no memory")
+
+            -- evicting would take the record away from whoever holds it and
+            -- report it against this request, so this login goes untracked
+            ngx.say(login_with("replay_full", saml_response({ id = "untracked" })))
+        }
+    }
+--- response_body
+full: true
+302 /
+--- error_log
+this login is not covered by replay tracking

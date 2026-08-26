@@ -553,13 +553,14 @@ end
 
 
 -- A bearer assertion is good for one login. Nothing above stops the same one
--- being presented again inside its validity window, so its ID is kept until it
--- expires and a second presentation is refused.
+-- being presented again inside its validity window, so its ID is remembered for
+-- as long as it could still be used and a second presentation is refused.
 --
--- The window from the assertion's own Conditions decides how long the entry
--- lives, so the cache holds exactly what is still usable. An assertion that
--- names no expiry is replayable for as long as it is remembered, which is what
--- replay_ttl bounds.
+-- A dict with no room leaves this assertion untracked rather than evicting one
+-- that is still protecting somebody else's login, which is what add would do on
+-- its own: the entry it takes belongs to another user, the login it stops
+-- protecting is theirs, and the warning is reported against whoever happened to
+-- need the space.
 local function assertions_unused(dict, opts, assertions, now)
     local skew = opts.clock_skew or DEFAULT_CLOCK_SKEW
 
@@ -583,16 +584,13 @@ local function assertions_unused(dict, opts, assertions, now)
         end
 
         local key = replay_key(opts, assertion)
-        local added, err, forcible = dict:add(key, true, ttl)
+        local added, add_err = dict:safe_add(key, true, ttl)
         if not added then
-            if err == "exists" then
+            if add_err == "exists" then
                 return false, "assertion " .. assertion.id .. " has been presented already"
             end
-            return false, "could not track assertion " .. assertion.id .. ": " .. tostring(err)
-        end
-        if forcible then
-            ngx.log(ngx.WARN, "the assertion replay dict is full, older assertions are ",
-                "no longer tracked")
+            ngx.log(ngx.ERR, "could not remember assertion ", loggable(assertion.id), ": ",
+                add_err, ", this login is not covered by replay tracking")
         end
     end
 

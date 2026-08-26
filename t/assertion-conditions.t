@@ -1186,7 +1186,7 @@ capped: true
 full: true
 302 /
 --- error_log
-this login is not covered by replay tracking
+in saml_replay_full: no memory, this login is not covered by replay tracking
 
 
 === TEST 41: a login refused after the checks leaves the assertion unspent
@@ -1275,3 +1275,33 @@ sp_issuer must be a string to track assertions
 replay_ttl must be a positive number of seconds
 replay_ttl must be a positive number of seconds
 built
+
+
+=== TEST 44: a confirmation bound this parser will not take is skipped
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            -- an offset rather than Z is legal xs:dateTime and refused here, so
+            -- that confirmation is unsatisfiable and the login rides on the
+            -- other one. Refusing on it would let replay_dict decide who is let
+            -- in, which is what the option must never do.
+            ngx.say(login_with("replay", function(request_id)
+                return saml_response({
+                    id = "unreadable-bound",
+                    confirmations = confirmation({
+                        recipient = ACS, not_on_or_after = at(600),
+                        in_response_to = request_id,
+                    }) .. confirmation({
+                        recipient = ACS, not_on_or_after = "2030-01-01T00:00:00+00:00",
+                        in_response_to = request_id,
+                    }),
+                }, ACS, request_id)
+            end))
+            local ttl = ngx.shared.saml_replay:ttl(replay_key("unreadable-bound"))
+            ngx.say("tracked: ", ttl > 600 and ttl <= 660)
+        }
+    }
+--- response_body
+302 /
+tracked: true

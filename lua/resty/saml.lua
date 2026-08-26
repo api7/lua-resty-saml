@@ -529,13 +529,13 @@ local function last_moment_usable(assertion)
 
     local latest
     for _, bound in ipairs(bounds) do
-        -- assertions_acceptable has already refused an unreadable one, so this
-        -- refuses the login rather than quietly shortening what is remembered
-        local at, err = parse_iso8601_utc_time(bound)
-        if not at then
-            return nil, "carries an unreadable NotOnOrAfter " .. bound .. ": " .. err
-        end
-        if latest == nil or at > latest then
+        -- A bound this parser will not take, a legal xs:dateTime carrying an
+        -- offset rather than Z, makes its own confirmation unsatisfiable and so
+        -- can never extend how long the assertion is usable. Refusing on it
+        -- would let replay_dict decide which logins are accepted, and one
+        -- satisfiable confirmation among several is enough for the checks above.
+        local at = parse_iso8601_utc_time(bound)
+        if at and (latest == nil or at > latest) then
             latest = at
         end
     end
@@ -572,10 +572,7 @@ local function spend_assertions(dict, opts, assertions, now)
         end
 
         local ttl = opts.replay_ttl or DEFAULT_REPLAY_TTL
-        local usable_until, err = last_moment_usable(assertion)
-        if err then
-            return false, "assertion " .. assertion.id .. " " .. err
-        end
+        local usable_until = last_moment_usable(assertion)
         if usable_until then
             ttl = usable_until + skew - now
         end
@@ -597,8 +594,9 @@ local function spend_assertions(dict, opts, assertions, now)
             end
             return false, "assertion " .. assertion.id .. " has been presented already"
         else
-            ngx.log(ngx.ERR, "could not remember assertion ", loggable(assertion.id), ": ",
-                add_err, ", this login is not covered by replay tracking")
+            ngx.log(ngx.ERR, "could not remember assertion ", loggable(assertion.id), " in ",
+                opts.replay_dict, ": ", add_err,
+                ", this login is not covered by replay tracking")
         end
     end
 

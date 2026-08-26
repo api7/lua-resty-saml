@@ -323,6 +323,11 @@ local DEFAULT_CLOCK_SKEW = 60
 -- how long an assertion that sets no expiry of its own is remembered
 local DEFAULT_REPLAY_TTL = 600
 
+-- and how long any assertion is remembered at most, whatever it claims. An
+-- assertion valid for years would pin a slot the dict never reclaims, and
+-- nobody is still trying to complete that login a day later.
+local MAX_REPLAY_TTL = 86400
+
 local function time_bounds_ok(not_before, not_on_or_after, now, skew)
     local opens, closes, err
 
@@ -573,6 +578,8 @@ local function assertions_unused(dict, opts, assertions, now)
         end
         if ttl < 1 then
             ttl = 1
+        elseif ttl > MAX_REPLAY_TTL then
+            ttl = MAX_REPLAY_TTL
         end
 
         local key = replay_key(opts, assertion)

@@ -1128,3 +1128,23 @@ default: true
 --- response_body
 302 /
 configured: true
+
+
+=== TEST 39: an assertion good for years is remembered for a day
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            -- the schema takes any year up to 9999, and an entry that never
+            -- lapses is a slot the dict never reclaims
+            ngx.say(login_with("replay", saml_response({
+                id = "forever",
+                conditions = conditions({ not_on_or_after = "9999-12-31T23:59:59Z" }),
+            })))
+            local ttl = ngx.shared.saml_replay:ttl(replay_key("forever"))
+            ngx.say("capped: ", ttl > 86300 and ttl <= 86400)
+        }
+    }
+--- response_body
+302 /
+capped: true

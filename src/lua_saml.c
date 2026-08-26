@@ -696,6 +696,7 @@ static int doc_assertions(lua_State* L) {
     lua_pushinteger(L, i + 1);
     lua_newtable(L);
     set_str_field(L, "id", a->id);
+    set_str_field(L, "issuer", a->issuer);
     set_bool_field(L, "has_conditions", a->has_conditions);
     set_str_field(L, "not_before", a->not_before);
     set_str_field(L, "not_on_or_after", a->not_on_or_after);

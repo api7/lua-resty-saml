@@ -497,6 +497,10 @@ static int read_assertion(xmlDoc* doc, xmlNode* node, saml_assertion_t* a) {
     return -1;
   }
 
+  // An ID is unique only within the IdP that minted it, so the caller keeps the
+  // two together. Absent and empty read alike here, as they do for doc_issuers.
+  a->issuer = issuer_of(doc, node);
+
   xmlNode* conditions = assertion_child(node, "Conditions");
   if (conditions != NULL) {
     a->has_conditions = 1;
@@ -608,6 +612,7 @@ void saml_assertions_free(saml_assertion_t* assertions, size_t assertions_len) {
   for (size_t i = 0; i < assertions_len; i++) {
     saml_assertion_t* a = assertions + i;
     xmlFree(a->id);
+    xmlFree(a->issuer);
     xmlFree(a->not_before);
     xmlFree(a->not_on_or_after);
     xmlFree(a->unknown_condition);

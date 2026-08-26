@@ -106,6 +106,7 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
             audiences = { sp_audiences = { "https://sp.example.com/metadata" } },
             acs = { sp_acs_url = "http://127.0.0.1:1984/acs" },
             replay = { replay_dict = "saml_replay" },
+            replay_short = { replay_dict = "saml_replay", replay_ttl = 90 },
         }
         SPS = {}
 
@@ -1045,17 +1046,11 @@ assertion once has been presented already
             -- accepted and so stops being worth remembering
             local ttl = ngx.shared.saml_replay:ttl(replay_key("bounded"))
             ngx.say("tracked: ", ttl > 600 and ttl <= 660)
-
-            ngx.say(login_with("replay", saml_response({ id = "unbounded" })))
-            local default = ngx.shared.saml_replay:ttl(replay_key("unbounded"))
-            ngx.say("default: ", default > 590 and default <= 600)
         }
     }
 --- response_body
 302 /
 tracked: true
-302 /
-default: true
 
 
 === TEST 35: two IdPs may mint the same assertion ID
@@ -1074,3 +1069,62 @@ default: true
 --- response_body
 302 /
 302 /
+
+
+=== TEST 36: an expiry the IdP puts on the confirmation decides it too
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            -- profile 4.1.4.2 puts a bearer assertion's expiry here, so a
+            -- Conditions naming only an audience is the ordinary shape. Reading
+            -- only Conditions forgot the assertion while it was still accepted.
+            ngx.say(login_with("replay", function(request_id)
+                return saml_response({
+                    id = "on-confirmation",
+                    conditions = conditions({ body = audience("sp") }),
+                    confirmations = confirmation({
+                        recipient = ACS, not_on_or_after = at(3600),
+                        in_response_to = request_id,
+                    }),
+                }, ACS, request_id)
+            end))
+            local ttl = ngx.shared.saml_replay:ttl(replay_key("on-confirmation"))
+            ngx.say("tracked: ", ttl > 3600 and ttl <= 3660)
+        }
+    }
+--- response_body
+302 /
+tracked: true
+
+
+=== TEST 37: an assertion naming no expiry falls back to replay_ttl
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            -- nothing bounds it, so it is replayable once the record lapses.
+            -- That is what replay_ttl is for and the README says so.
+            ngx.say(login_with("replay", saml_response({ id = "unbounded" })))
+            local ttl = ngx.shared.saml_replay:ttl(replay_key("unbounded"))
+            ngx.say("default: ", ttl > 590 and ttl <= 600)
+        }
+    }
+--- response_body
+302 /
+default: true
+
+
+=== TEST 38: replay_ttl settles that fallback
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            ngx.say(login_with("replay_short", saml_response({ id = "configured" })))
+            local ttl = ngx.shared.saml_replay:ttl(replay_key("configured"))
+            ngx.say("configured: ", ttl > 80 and ttl <= 90)
+        }
+    }
+--- response_body
+302 /
+configured: true

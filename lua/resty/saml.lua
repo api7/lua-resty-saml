@@ -504,6 +504,41 @@ local function issuers_allowed(allowed, issuers)
     return true
 end
 
+-- The last moment any bound this SP weighed would still admit the assertion.
+-- Conditions/@NotOnOrAfter is one of them; profile 4.1.4.2 puts a bearer
+-- assertion's expiry on its confirmation instead, so a Conditions carrying
+-- nothing but an audience is the profile-minimal shape rather than an odd one.
+-- The latest of them decides: remembering too long costs a slot, remembering
+-- too little reopens the window the record is there to close. Nil when nothing
+-- names one at all, which is what replay_ttl stands in for.
+local function last_moment_usable(assertion)
+    local bounds = {}
+    if assertion.not_on_or_after then
+        bounds[#bounds + 1] = assertion.not_on_or_after
+    end
+    for _, confirmation in ipairs(assertion.subject_confirmations) do
+        if confirmation.not_on_or_after then
+            bounds[#bounds + 1] = confirmation.not_on_or_after
+        end
+    end
+
+    local latest
+    for _, bound in ipairs(bounds) do
+        -- assertions_acceptable has already refused an unreadable one, so this
+        -- refuses the login rather than quietly shortening what is remembered
+        local at, err = parse_iso8601_utc_time(bound)
+        if not at then
+            return nil, "carries an unreadable NotOnOrAfter " .. bound .. ": " .. err
+        end
+        if latest == nil or at > latest then
+            latest = at
+        end
+    end
+
+    return latest
+end
+
+
 -- An ID is unique only within the IdP that minted it, and idp_issuers takes a
 -- list, so the two travel together. The SP name keeps instances sharing one
 -- dict apart.
@@ -529,11 +564,12 @@ local function assertions_unused(dict, opts, assertions, now)
         end
 
         local ttl = opts.replay_ttl or DEFAULT_REPLAY_TTL
-        if assertion.not_on_or_after then
-            local expires = parse_iso8601_utc_time(assertion.not_on_or_after)
-            if expires then
-                ttl = expires + skew - now
-            end
+        local usable_until, err = last_moment_usable(assertion)
+        if err then
+            return false, "assertion " .. assertion.id .. " " .. err
+        end
+        if usable_until then
+            ttl = usable_until + skew - now
         end
         if ttl < 1 then
             ttl = 1

@@ -509,38 +509,55 @@ local function issuers_allowed(allowed, issuers)
     return true
 end
 
--- The last moment any bound this SP weighed would still admit the assertion.
--- Conditions/@NotOnOrAfter is one of them; profile 4.1.4.2 puts a bearer
--- assertion's expiry on its confirmation instead, so a Conditions carrying
--- nothing but an audience is the profile-minimal shape rather than an odd one.
--- The latest of them decides: remembering too long costs a slot, remembering
--- too little reopens the window the record is there to close. Nil when nothing
--- names one at all, which is what replay_ttl stands in for.
-local function last_moment_usable(assertion)
-    local bounds = {}
-    if assertion.not_on_or_after then
-        bounds[#bounds + 1] = assertion.not_on_or_after
-    end
+-- The last moment the checks above would still admit the assertion. They
+-- combine as an AND: the Conditions window has to hold, and one confirmation
+-- has to be satisfiable, so acceptance ends at whichever gives out first, the
+-- Conditions close or the last confirmation still standing. Profile 4.1.4.2
+-- puts a bearer assertion's expiry on its confirmation, so a Conditions
+-- carrying nothing but an audience is the profile-minimal shape rather than an
+-- odd one. Nil when nothing bounds acceptance, which replay_ttl stands in for.
+--
+-- Only confirmations that could ever confirm at this SP have a say, the same
+-- ones confirmation_ok weighs, minus the clock: one naming another Recipient
+-- or another request can never keep the assertion alive here, and one whose
+-- close this parser will not take, a legal xs:dateTime carrying an offset
+-- rather than Z, is unsatisfiable in the same way. Reading those as
+-- contributing nothing rather than as unbounded matters in both directions,
+-- since a confirmation naming no close never gives out: one satisfiable such
+-- confirmation means the confirmations impose no limit at all, where the
+-- earlier reading let a shorter sibling shrink the record below what an
+-- absent sibling would have left it.
+local function last_moment_usable(assertion, expected)
+    local notes_close
+    local unbounded = #assertion.subject_confirmations == 0
     for _, confirmation in ipairs(assertion.subject_confirmations) do
-        if confirmation.not_on_or_after then
-            bounds[#bounds + 1] = confirmation.not_on_or_after
+        local confirms_here = confirmation.recipient == expected.acs_url and
+            (confirmation.in_response_to == nil or
+                confirmation.in_response_to == expected.request_id)
+        if confirms_here then
+            if confirmation.not_on_or_after == nil then
+                unbounded = true
+            else
+                local at = parse_iso8601_utc_time(confirmation.not_on_or_after)
+                if at and (notes_close == nil or at > notes_close) then
+                    notes_close = at
+                end
+            end
         end
     end
-
-    local latest
-    for _, bound in ipairs(bounds) do
-        -- A bound this parser will not take, a legal xs:dateTime carrying an
-        -- offset rather than Z, makes its own confirmation unsatisfiable and so
-        -- can never extend how long the assertion is usable. Refusing on it
-        -- would let replay_dict decide which logins are accepted, and one
-        -- satisfiable confirmation among several is enough for the checks above.
-        local at = parse_iso8601_utc_time(bound)
-        if at and (latest == nil or at > latest) then
-            latest = at
-        end
+    if unbounded then
+        notes_close = nil
     end
 
-    return latest
+    local conditions_close
+    if assertion.not_on_or_after then
+        conditions_close = parse_iso8601_utc_time(assertion.not_on_or_after)
+    end
+
+    if conditions_close and notes_close then
+        return math.min(conditions_close, notes_close)
+    end
+    return conditions_close or notes_close
 end
 
 
@@ -562,7 +579,7 @@ end
 -- protecting somebody else's login, which is what add would do on its own: the
 -- entry it takes belongs to another user, the login it stops protecting is
 -- theirs, and the warning is reported against whoever needed the space.
-local function spend_assertions(dict, opts, assertions, now)
+local function spend_assertions(dict, opts, assertions, expected, now)
     local skew = opts.clock_skew or DEFAULT_CLOCK_SKEW
     local spent = {}
 
@@ -572,7 +589,7 @@ local function spend_assertions(dict, opts, assertions, now)
         end
 
         local ttl = opts.replay_ttl or DEFAULT_REPLAY_TTL
-        local usable_until = last_moment_usable(assertion)
+        local usable_until = last_moment_usable(assertion, expected)
         if usable_until then
             ttl = usable_until + skew - now
         end
@@ -731,7 +748,8 @@ local function login_callback(self, opts)
     -- the last gate: everything that can still refuse this login has run, so
     -- the assertion is spent only where it actually authenticates somebody
     if self.replay_dict then
-        local unused, used_reason = spend_assertions(self.replay_dict, opts, assertions, now)
+        local unused, used_reason = spend_assertions(self.replay_dict, opts, assertions,
+            expected, now)
         if not unused then
             ngx.log(ngx.ERR, "response from IdP rejected: ", loggable(used_reason))
             ngx.exit(ngx.HTTP_UNAUTHORIZED)

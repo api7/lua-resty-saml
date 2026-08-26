@@ -1305,3 +1305,84 @@ built
 --- response_body
 302 /
 tracked: true
+
+
+=== TEST 45: a confirmation naming no close keeps the fallback in charge
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            -- the dated sibling gives out in a minute; the dateless one never
+            -- does, so it decides, and the record falls to replay_ttl rather
+            -- than to the shortest date in sight
+            ngx.say(login_with("replay", function(request_id)
+                return saml_response({
+                    id = "never-gives-out",
+                    confirmations = confirmation({
+                        recipient = ACS, not_on_or_after = at(60),
+                        in_response_to = request_id,
+                    }) .. confirmation({
+                        recipient = ACS, in_response_to = request_id,
+                    }),
+                }, ACS, request_id)
+            end))
+            local ttl = ngx.shared.saml_replay:ttl(replay_key("never-gives-out"))
+            ngx.say("fallback: ", ttl > 590 and ttl <= 600)
+        }
+    }
+--- response_body
+302 /
+fallback: true
+
+
+=== TEST 46: acceptance ends at whichever close comes first
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            -- the Conditions window and the confirmations combine as an AND,
+            -- so the Conditions closing first is when acceptance ends
+            ngx.say(login_with("replay", function(request_id)
+                return saml_response({
+                    id = "conditions-first",
+                    conditions = conditions({ not_on_or_after = at(300) }),
+                    confirmations = confirmation({
+                        recipient = ACS, not_on_or_after = at(3600),
+                        in_response_to = request_id,
+                    }),
+                }, ACS, request_id)
+            end))
+            local ttl = ngx.shared.saml_replay:ttl(replay_key("conditions-first"))
+            ngx.say("earlier: ", ttl > 300 and ttl <= 360)
+        }
+    }
+--- response_body
+302 /
+earlier: true
+
+
+=== TEST 47: a confirmation that cannot confirm here has no say in the record
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            -- the dateless one is addressed elsewhere, so it can never keep
+            -- this assertion alive here and does not unbound the record
+            ngx.say(login_with("replay", function(request_id)
+                return saml_response({
+                    id = "elsewhere-dateless",
+                    confirmations = confirmation({
+                        recipient = ACS, not_on_or_after = at(3600),
+                        in_response_to = request_id,
+                    }) .. confirmation({
+                        recipient = "https://other-sp.example.com/acs",
+                    }),
+                }, ACS, request_id)
+            end))
+            local ttl = ngx.shared.saml_replay:ttl(replay_key("elsewhere-dateless"))
+            ngx.say("dated one decides: ", ttl > 3600 and ttl <= 3660)
+        }
+    }
+--- response_body
+302 /
+dated one decides: true

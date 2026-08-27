@@ -1492,3 +1492,23 @@ qr/\[warn\] .* assertion stamped-forever carries OneTimeUse but stays acceptable
 --- response_body
 one_time_use=true unknown_condition=Condition
 one_time_use=true unknown_condition=Condition
+
+
+
+=== TEST 52: without a record, an OneTimeUse assertion is accepted again
+--- config
+    location /t {
+        content_by_lua_block {
+            local xml = saml_response({
+                id = "stamped-untracked",
+                conditions = conditions({ not_on_or_after = at(600), body = "<saml:OneTimeUse/>" }),
+            })
+            ngx.say(login_with("plain", xml))
+            ngx.say(login_with("plain", xml))
+        }
+    }
+--- response_body
+302 /
+302 /
+--- error_log eval
+qr/\[warn\] .* assertion stamped-untracked carries OneTimeUse, which this SP cannot enforce without replay_dict/

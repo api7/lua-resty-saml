@@ -632,7 +632,7 @@ response from IdP is addressed to http://evil.example.com/acs
         content_by_lua_block {
             local xml = sign_doc(response(
                 assertion({ id = "a1", conditions = conditions({ not_on_or_after = "2026-07-21T00:00:00Z",
-                    body = audience("sp") }) }) ..
+                    body = audience("sp") .. "<saml:OneTimeUse/>" }) }) ..
                 assertion({ id = "a2", name_id = "second@example.com",
                     confirmations = confirmation({ recipient = ACS }) })))
             local doc, err = parse(xml)
@@ -642,14 +642,15 @@ response from IdP is addressed to http://evil.example.com/acs
                 ngx.say(a.id, " conditions=", tostring(a.has_conditions),
                     " expires=", tostring(a.not_on_or_after),
                     " audiences=", #a.audience_restrictions,
-                    " confirmations=", #a.subject_confirmations)
+                    " confirmations=", #a.subject_confirmations,
+                    " one_time_use=", tostring(a.one_time_use))
             end
             ngx.say("destination: ", tostring(saml.doc_destination(doc)))
         }
     }
 --- response_body
-a1 conditions=true expires=2026-07-21T00:00:00Z audiences=1 confirmations=0
-a2 conditions=false expires=nil audiences=0 confirmations=1
+a1 conditions=true expires=2026-07-21T00:00:00Z audiences=1 confirmations=0 one_time_use=true
+a2 conditions=false expires=nil audiences=0 confirmations=1 one_time_use=false
 destination: nil
 
 
@@ -1390,26 +1391,33 @@ dated one decides: true
 
 
 
-=== TEST 48: OneTimeUse is met by the replay record where there is one
+=== TEST 48: with a record, an OneTimeUse assertion is treated like any other
 --- config
     location /t {
         content_by_lua_block {
             ngx.shared.saml_replay:flush_all()
             local xml = saml_response({
-                id = "single", conditions = conditions({ body = "<saml:OneTimeUse/>" }),
+                id = "stamped",
+                conditions = conditions({ not_on_or_after = at(600), body = "<saml:OneTimeUse/>" }),
             })
             ngx.say(login_with("replay", xml))
+            -- remembered until acceptance ends plus clock_skew, as any other
+            local ttl = ngx.shared.saml_replay:ttl(replay_key("stamped"))
+            ngx.say("recorded: ", ttl > 650 and ttl <= 660)
             ngx.say(login_with("replay", xml))
         }
     }
 --- response_body
 302 /
+recorded: true
 401 nil
 --- error_log
-assertion single has been presented already
+assertion stamped has been presented already
 --- no_error_log
 [crit]
-cannot enforce without replay_dict
+[alert]
+[emerg]
+OneTimeUse
 
 
 

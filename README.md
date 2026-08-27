@@ -144,8 +144,8 @@ alternative is a record nothing reclaims. The limit an operator can move is
 **This is what `<saml:OneTimeUse/>` asks for.** An IdP stamps that condition on an
 assertion to ask the SP to keep exactly this record. SAML Core 2.5.1.5 makes the
 condition always valid, a condition on use rather than on validity, so the login goes
-through with or without the option. With it, the assertion is single-use as the IdP
-asked. Without it, the login is accepted and a line at `warn` level names `replay_dict`,
+through with or without the option. With it, the assertion is single-use within the
+bounds above. Without it, the login is accepted and a line at `warn` level names `replay_dict`,
 so an IdP that asks for this is the signal to set it; a deployment logging at `error`
 or above does not see it.
 

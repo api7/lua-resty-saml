@@ -1469,3 +1469,26 @@ in saml_replay_full: no memory, this login is not covered by replay tracking tho
 --- error_log eval
 [qr/\[warn\] .* assertion stamped-unbounded carries OneTimeUse but stays acceptable past its record, which lapses in 600 seconds/,
 qr/\[warn\] .* assertion stamped-forever carries OneTimeUse but stays acceptable past its record, which lapses in 86400 seconds/]
+
+
+
+=== TEST 51: OneTimeUse is read wherever it sits among the conditions
+--- config
+    location /t {
+        content_by_lua_block {
+            local unknown = '<saml:Condition xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ' ..
+                'xsi:type="saml:AudienceRestrictionType"><saml:Audience>sp</saml:Audience></saml:Condition>'
+            for _, body in ipairs({ "<saml:OneTimeUse/>" .. unknown, unknown .. "<saml:OneTimeUse/>" }) do
+                local doc, err = parse(sign_doc(response(assertion({
+                    id = "ordered", conditions = conditions({ body = body }),
+                }))))
+                if err then ngx.say("err: ", err) return end
+                local a = saml.doc_assertions(doc)[1]
+                ngx.say("one_time_use=", tostring(a.one_time_use),
+                    " unknown_condition=", tostring(a.unknown_condition))
+            end
+        }
+    }
+--- response_body
+one_time_use=true unknown_condition=Condition
+one_time_use=true unknown_condition=Condition

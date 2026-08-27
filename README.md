@@ -84,7 +84,7 @@ local saml = resty_saml.new(opts)
 | `sp_audiences`      | array of strings       | `{ sp_issuer }`      | Audiences this SP answers to. An assertion carrying an `AudienceRestriction` has to name one of them; an assertion carrying none is unrestricted.       |
 | `clock_skew`      | number       | `60`      | Seconds of clock difference tolerated against the IdP when weighing `NotBefore` and `NotOnOrAfter`.       |
 | `replay_dict`      | string       | None      | Name of an `lua_shared_dict` in which to remember the assertions this instance has already accepted, so it accepts none of them twice. Unset leaves them untracked. See [Remembering assertions](#remembering-assertions) for what the zone has to hold and how far the guarantee reaches.       |
-| `replay_ttl`      | number       | `600`      | Seconds to remember an assertion that names no `NotOnOrAfter` anywhere, on its `Conditions` or on any subject confirmation. One that names it is remembered until that moment plus `clock_skew`, capped at a day.       |
+| `replay_ttl`      | number       | `600`      | Seconds to remember an assertion when nothing bounds its acceptance: no `NotOnOrAfter` on its `Conditions` and none on a satisfiable subject confirmation. A bounded one is remembered until acceptance ends, plus `clock_skew`, capped at a day.       |
 
 #### Binding a response to the request
 
@@ -131,6 +131,14 @@ the assertion and the zone, rather than evicting an entry that is still protecti
 somebody else. A response carrying several assertions can end up partly tracked,
 which is the safe direction: a later replay still collides on whichever of them was
 recorded.
+
+**The record is bounded even where acceptance is not.** An assertion that names no
+expiry is remembered for `replay_ttl` and accepted for good, so it is refusable only
+inside that window; one the IdP made valid beyond a day is remembered for the day
+and accepted again past it. Both need an IdP far outside shipped defaults, where
+the delivery window is minutes and the assertion window at most an hour, and the
+alternative is a record nothing reclaims. The limit an operator can move is
+`replay_ttl`; the day cap is fixed.
 
 **Two things it deliberately does not do.** An assertion carrying `<saml:OneTimeUse/>`
 is still refused outright, so an IdP asking for exactly this protection cannot log in

@@ -141,12 +141,17 @@ the delivery window is minutes and the assertion window at most an hour, and the
 alternative is a record nothing reclaims. The limit an operator can move is
 `replay_ttl`; the day cap is fixed.
 
-**Two things it deliberately does not do.** An assertion carrying `<saml:OneTimeUse/>`
-is still refused outright, so an IdP asking for exactly this protection cannot log in
-even with the option on; that is tracked separately and the two do not meet yet. And
-re-submitting a response that already logged in is refused, which is what a browser
-does when it loses the redirect that ends a login. Returning to the application starts
-a fresh login, and the IdP will not ask for a password again.
+**This is what `<saml:OneTimeUse/>` asks for.** An IdP stamps that condition on an
+assertion to ask the SP to keep exactly this record. SAML Core 2.5.1.5 makes the
+condition always valid, a condition on use rather than on validity, so the login goes
+through with or without the option. With it, the assertion is single-use as the IdP
+asked. Without it, the login is accepted and a warning names `replay_dict`, so an IdP
+that asks for this is the signal to set it.
+
+**One thing it deliberately does not do.** Re-submitting a response that already logged
+in is refused, which is what a browser does when it loses the redirect that ends a
+login. Returning to the application starts a fresh login, and the IdP will not ask for
+a password again.
 
 #### Seeding the worker
 

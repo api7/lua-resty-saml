@@ -574,9 +574,10 @@ offers no subject confirmation this SP can satisfy
             ngx.say(login_with("plain", saml_response({
                 conditions = conditions({ body = "<saml:ProxyRestriction Count=\"1\"/>" }),
             })))
-            -- OneTimeUse asks this SP to remember which assertions it has spent
+            -- OneTimeUse is always valid (Core 2.5.1.5); with no replay_dict it
+            -- asks for a record this SP does not keep, which is said, not refused
             ngx.say(login_with("plain", saml_response({
-                conditions = conditions({ body = "<saml:OneTimeUse/>" }),
+                id = "single", conditions = conditions({ body = "<saml:OneTimeUse/>" }),
             })))
             -- and a condition it has never heard of asks who knows what
             ngx.say(login_with("plain", saml_response({
@@ -589,10 +590,10 @@ offers no subject confirmation this SP can satisfy
     }
 --- response_body
 302 /
-401 nil
+302 /
 401 nil
 --- error_log eval
-[qr/carries a condition this SP cannot satisfy: OneTimeUse/,
+[qr/\[warn\] .* assertion single carries OneTimeUse, which this SP cannot enforce without replay_dict/,
 qr/carries a condition this SP cannot satisfy: Condition/]
 
 
@@ -1386,3 +1387,26 @@ earlier: true
 --- response_body
 302 /
 dated one decides: true
+
+
+
+=== TEST 48: OneTimeUse is met by the replay record where there is one
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            local xml = saml_response({
+                id = "single", conditions = conditions({ body = "<saml:OneTimeUse/>" }),
+            })
+            ngx.say(login_with("replay", xml))
+            ngx.say(login_with("replay", xml))
+        }
+    }
+--- response_body
+302 /
+401 nil
+--- error_log
+assertion single has been presented already
+--- no_error_log
+[crit]
+cannot enforce without replay_dict

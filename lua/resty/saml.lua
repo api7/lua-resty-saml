@@ -419,6 +419,15 @@ local function assertions_acceptable(opts, assertions, expected, now)
                 assertion.unknown_condition
         end
 
+        -- Core 2.5.1.5: OneTimeUse is always valid, and asks the SP to keep a
+        -- record of the assertions it has spent. replay_dict is that record;
+        -- without it the IdP's request goes unmet, and the operator is told
+        -- what to configure rather than the user refused
+        if assertion.one_time_use and not opts.replay_dict then
+            ngx.log(ngx.WARN, "assertion ", loggable(assertion.id),
+                " carries OneTimeUse, which this SP cannot enforce without replay_dict")
+        end
+
         local ok, err = time_bounds_ok(assertion.not_before, assertion.not_on_or_after, now, skew)
         if not ok then
             return false, where .. err

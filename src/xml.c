@@ -396,18 +396,19 @@ static size_t count_assertion_el(xmlNode* parent, const char* name) {
 }
 
 
-// Conditions this SP can actually satisfy. SAML Core 2.5.1 makes an assertion
+// Conditions this SP understands. SAML Core 2.5.1 makes an assertion
 // carrying any other one Indeterminate rather than valid, so everything else is
 // reported for the caller to refuse.
 //
-// ProxyRestriction is here because it binds an IdP issuing on behalf of another
-// IdP and asks nothing of the SP consuming the assertion. OneTimeUse is not,
-// because honouring it means remembering which assertions have been spent, and
-// Core 2.5.1.5 tells a party that cannot keep that record to treat the
-// assertion as invalid.
+// ProxyRestriction binds an IdP issuing on behalf of another IdP and asks
+// nothing of the SP consuming the assertion. OneTimeUse is always valid by
+// Core 2.5.1.5, a condition on use rather than on validity: it asks the SP to
+// keep a record of the assertions it has spent, which the caller has or has
+// not, so it is reported as a flag.
 static int is_known_condition(xmlNode* node) {
   return is_assertion_el(node, "AudienceRestriction") ||
-    is_assertion_el(node, "ProxyRestriction");
+    is_assertion_el(node, "ProxyRestriction") ||
+    is_assertion_el(node, "OneTimeUse");
 }
 
 
@@ -510,6 +511,9 @@ static int read_assertion(xmlDoc* doc, xmlNode* node, saml_assertion_t* a) {
     }
 
     for (xmlNode* child = conditions->children; child != NULL; child = child->next) {
+      if (is_assertion_el(child, "OneTimeUse")) {
+        a->one_time_use = 1;
+      }
       if (child->type == XML_ELEMENT_NODE && !is_known_condition(child)) {
         // the caller refuses the assertion on this name, so losing it would
         // let the condition through rather than fail the read

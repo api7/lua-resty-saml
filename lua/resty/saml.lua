@@ -405,7 +405,7 @@ end
 
 -- Every top-level assertion the verified signature left in the document is one
 -- the readers draw identity from, so every one of them has to hold up.
-local function assertions_acceptable(opts, assertions, expected, now)
+local function assertions_acceptable(opts, assertions, expected, now, replay_dict)
     local skew = opts.clock_skew or DEFAULT_CLOCK_SKEW
     local accepted = opts.sp_audiences or { opts.sp_issuer }
 
@@ -422,8 +422,9 @@ local function assertions_acceptable(opts, assertions, expected, now)
         -- Core 2.5.1.5: OneTimeUse is always valid, and asks the SP to keep a
         -- record of the assertions it has spent. replay_dict is that record;
         -- without it the IdP's request goes unmet, and the operator is told
-        -- what to configure rather than the user refused
-        if assertion.one_time_use and not opts.replay_dict then
+        -- what to configure rather than the user refused. The handle is the
+        -- one the last gate enforces on, so the two cannot disagree
+        if assertion.one_time_use and not replay_dict then
             ngx.log(ngx.WARN, "assertion ", loggable(assertion.id),
                 " carries OneTimeUse, which this SP cannot enforce without replay_dict")
         end
@@ -622,7 +623,8 @@ local function spend_assertions(dict, opts, assertions, expected, now)
         else
             ngx.log(ngx.ERR, "could not remember assertion ", loggable(assertion.id), " in ",
                 opts.replay_dict, ": ", add_err,
-                ", this login is not covered by replay tracking")
+                ", this login is not covered by replay tracking",
+                assertion.one_time_use and " though it carries OneTimeUse" or "")
         end
     end
 
@@ -714,7 +716,8 @@ local function login_callback(self, opts)
     end
 
     local now = ngx.time()
-    local acceptable, reason = assertions_acceptable(opts, assertions, expected, now)
+    local acceptable, reason = assertions_acceptable(opts, assertions, expected, now,
+        self.replay_dict)
     if not acceptable then
         ngx.log(ngx.ERR, "response from IdP rejected: ", loggable(reason))
         ngx.exit(ngx.HTTP_UNAUTHORIZED)

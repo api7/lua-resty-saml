@@ -1410,3 +1410,35 @@ assertion single has been presented already
 --- no_error_log
 [crit]
 cannot enforce without replay_dict
+
+
+
+=== TEST 49: a full dict says when the untracked login asked for single use
+--- config
+    location /t {
+        content_by_lua_block {
+            local dict = ngx.shared.saml_replay_full
+            dict:flush_all()
+            dict:flush_expired()
+            local filler = string.rep("x", 256)
+            local i, ok = 0, true
+            while ok do
+                ok = dict:safe_set("filler-" .. i, filler, 600)
+                if ok then i = i + 1 end
+                if i > 5000 then break end
+            end
+            local j = 0
+            while dict:safe_add("small-" .. j, true, 600) do
+                j = j + 1
+                if j > 5000 then break end
+            end
+            ngx.say(login_with("replay_full", saml_response({
+                id = "untracked-stamped",
+                conditions = conditions({ body = "<saml:OneTimeUse/>" }),
+            })))
+        }
+    }
+--- response_body
+302 /
+--- error_log
+in saml_replay_full: no memory, this login is not covered by replay tracking though it carries OneTimeUse

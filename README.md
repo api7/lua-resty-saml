@@ -145,8 +145,9 @@ alternative is a record nothing reclaims. The limit an operator can move is
 assertion to ask the SP to keep exactly this record. SAML Core 2.5.1.5 makes the
 condition always valid, a condition on use rather than on validity, so the login goes
 through with or without the option. With it, the assertion is single-use as the IdP
-asked. Without it, the login is accepted and a warning names `replay_dict`, so an IdP
-that asks for this is the signal to set it.
+asked. Without it, the login is accepted and a line at `warn` level names `replay_dict`,
+so an IdP that asks for this is the signal to set it; a deployment logging at `error`
+or above does not see it.
 
 **One thing it deliberately does not do.** Re-submitting a response that already logged
 in is refused, which is what a browser does when it loses the redirect that ends a

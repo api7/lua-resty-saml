@@ -1442,3 +1442,30 @@ cannot enforce without replay_dict
 302 /
 --- error_log
 in saml_replay_full: no memory, this login is not covered by replay tracking though it carries OneTimeUse
+
+
+
+=== TEST 50: an OneTimeUse assertion that outlives its record says so
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            -- nothing bounds it, so the record falls back to replay_ttl
+            ngx.say(login_with("replay", saml_response({
+                id = "stamped-unbounded",
+                conditions = conditions({ body = "<saml:OneTimeUse/>" }),
+            })))
+            -- valid for years, so the record is capped at a day
+            ngx.say(login_with("replay", saml_response({
+                id = "stamped-forever",
+                conditions = conditions({ not_on_or_after = "9999-12-31T23:59:59Z",
+                    body = "<saml:OneTimeUse/>" }),
+            })))
+        }
+    }
+--- response_body
+302 /
+302 /
+--- error_log eval
+[qr/\[warn\] .* assertion stamped-unbounded carries OneTimeUse but stays acceptable past its record, which lapses in 600 seconds/,
+qr/\[warn\] .* assertion stamped-forever carries OneTimeUse but stays acceptable past its record, which lapses in 86400 seconds/]

@@ -609,6 +609,15 @@ local function spend_assertions(dict, opts, assertions, expected, now)
             ttl = MAX_REPLAY_TTL
         end
 
+        -- the record is bounded where acceptance is not, so past it the
+        -- assertion is accepted again. An IdP that asked for single use is
+        -- told, since it is the IdP's window that made the record fall short
+        if assertion.one_time_use and (usable_until == nil or ttl == MAX_REPLAY_TTL) then
+            ngx.log(ngx.WARN, "assertion ", loggable(assertion.id),
+                " carries OneTimeUse but stays acceptable past its record, which lapses in ",
+                ttl, " seconds")
+        end
+
         local key = replay_key(opts, assertion)
         local added, add_err = dict:safe_add(key, true, ttl)
         if added then

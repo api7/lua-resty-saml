@@ -37,10 +37,10 @@ test: build deps/
 clean:
 	rm -rf *.so *.o xmlsec1-$(XMLSEC_VER)*
 
-saml.o: src/*.c
+saml.o: src/*.c src/*.h
 	$(CC) -c $(CFLAGS_ALL) -o saml.o src/saml.c
 
-lua_saml.o: src/lua_saml.c
+lua_saml.o: src/lua_saml.c src/*.h
 	$(CC) -c $(CFLAGS_ALL) -I$(LUA_INCDIR) -Isrc/ -o $@ $<
 
 saml.so: lua_saml.o saml.o

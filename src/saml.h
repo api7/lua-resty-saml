@@ -57,6 +57,7 @@ typedef struct {
 
 typedef struct {
   xmlChar* id;
+  xmlChar* issuer;
   int has_conditions;
   xmlChar* not_before;
   xmlChar* not_on_or_after;

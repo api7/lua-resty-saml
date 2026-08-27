@@ -35,6 +35,12 @@ _EOC_
     lua_package_path '$pwd/lua/?.lua;$pwd/deps/share/lua/5.1/?.lua;$pwd/t/?.lua;;';
     lua_package_cpath '$pwd/?.so;$pwd/deps/lib/lua/5.1/?.so;;';
 
+    # a zone of the same name and size is reused across a reload, so entries
+    # outlive the block that made them under TEST_NGINX_USE_HUP=1. Blocks name
+    # their own assertions to stay apart, and flush as well
+    lua_shared_dict saml_replay 1m;
+    lua_shared_dict saml_replay_full 32k;
+
     init_by_lua_block {
         saml = require "saml"
         local err = saml.init({ debug = true, data_dir = os.getenv("SAML_DATA_DIR") })
@@ -100,6 +106,13 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
             skew = { clock_skew = 300 },
             audiences = { sp_audiences = { "https://sp.example.com/metadata" } },
             acs = { sp_acs_url = "http://127.0.0.1:1984/acs" },
+            replay = { replay_dict = "saml_replay" },
+            replay_short = { replay_dict = "saml_replay", replay_ttl = 90 },
+            replay_full = { replay_dict = "saml_replay_full" },
+            replay_pinned = {
+                replay_dict = "saml_replay",
+                idp_issuers = { "https://elsewhere.example.com" },
+            },
         }
         SPS = {}
 
@@ -190,7 +203,7 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
                 'ID="%s" Version="2.0" IssueInstant="2026-07-21T00:00:00Z">' ..
                 '<saml:Issuer>%s</saml:Issuer>' ..
                 '<saml:Subject><saml:NameID>%s</saml:NameID>%s</saml:Subject>%s%s</saml:Assertion>',
-                spec.id or "a1", IDP, spec.name_id or "signed\@example.com",
+                spec.id or "a1", spec.issuer or IDP, spec.name_id or "signed\@example.com",
                 spec.confirmations or "", spec.conditions or "",
                 authn_statement(spec.session_expires))
         end
@@ -220,6 +233,12 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
             local doc = assert(saml.binding_redirect_parse("SAMLRequest", args,
                 function(_) return cert end))
             return saml.doc_id(doc)
+        end
+
+        -- the module owns this layout; naming it once here keeps a change to
+        -- the scheme from surfacing as a comparison against nil
+        function replay_key(id, issuer)
+            return "sp|" .. (issuer or IDP) .. "|" .. id
         end
 
         function callback_headers(name, cookie, extra)
@@ -986,3 +1005,384 @@ offers no subject confirmation this SP can satisfy
 302 http://127.0.0.1:1984/idp
 --- error_log
 session carries no request id, starting the login again
+
+
+=== TEST 32: an assertion is good for one login
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            local xml = saml_response({
+                id = "once", conditions = conditions({ not_on_or_after = at(600) }),
+            })
+            ngx.say(login_with("replay", xml))
+            ngx.say(login_with("replay", xml))
+        }
+    }
+--- response_body
+302 /
+401 nil
+--- error_log
+assertion once has been presented already
+
+
+=== TEST 33: a second assertion of its own is accepted
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            ngx.say(login_with("replay", saml_response({ id = "first" })))
+            ngx.say(login_with("replay", saml_response({ id = "second" })))
+        }
+    }
+--- response_body
+302 /
+302 /
+
+
+=== TEST 34: an assertion is remembered for as long as it is usable
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            ngx.say(login_with("replay", saml_response({
+                id = "bounded", conditions = conditions({ not_on_or_after = at(600) }),
+            })))
+            -- the window plus the skew allowance, which is when it stops being
+            -- accepted and so stops being worth remembering
+            local ttl = ngx.shared.saml_replay:ttl(replay_key("bounded"))
+            ngx.say("tracked: ", ttl > 600 and ttl <= 660)
+        }
+    }
+--- response_body
+302 /
+tracked: true
+
+
+=== TEST 35: two IdPs may mint the same assertion ID
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            -- an ID is unique only within the IdP that issued it, so sharing
+            -- one is not a replay
+            ngx.say(login_with("replay", saml_response({ id = "shared" })))
+            ngx.say(login_with("replay", saml_response({
+                id = "shared", issuer = "https://second-idp.example.com",
+            })))
+        }
+    }
+--- response_body
+302 /
+302 /
+
+
+=== TEST 36: an expiry the IdP puts on the confirmation decides it too
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            -- profile 4.1.4.2 puts a bearer assertion's expiry here, so a
+            -- Conditions naming only an audience is the ordinary shape. Reading
+            -- only Conditions forgot the assertion while it was still accepted.
+            ngx.say(login_with("replay", function(request_id)
+                return saml_response({
+                    id = "on-confirmation",
+                    conditions = conditions({ body = audience("sp") }),
+                    confirmations = confirmation({
+                        recipient = ACS, not_on_or_after = at(3600),
+                        in_response_to = request_id,
+                    }),
+                }, ACS, request_id)
+            end))
+            local ttl = ngx.shared.saml_replay:ttl(replay_key("on-confirmation"))
+            ngx.say("tracked: ", ttl > 3600 and ttl <= 3660)
+        }
+    }
+--- response_body
+302 /
+tracked: true
+
+
+=== TEST 37: an assertion naming no expiry falls back to replay_ttl
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            -- nothing bounds it, so it is replayable once the record lapses.
+            -- That is what replay_ttl is for and the README says so.
+            ngx.say(login_with("replay", saml_response({ id = "unbounded" })))
+            local ttl = ngx.shared.saml_replay:ttl(replay_key("unbounded"))
+            ngx.say("default: ", ttl > 590 and ttl <= 600)
+        }
+    }
+--- response_body
+302 /
+default: true
+
+
+=== TEST 38: replay_ttl settles that fallback
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            ngx.say(login_with("replay_short", saml_response({ id = "configured" })))
+            local ttl = ngx.shared.saml_replay:ttl(replay_key("configured"))
+            ngx.say("configured: ", ttl > 80 and ttl <= 90)
+        }
+    }
+--- response_body
+302 /
+configured: true
+
+
+=== TEST 39: an assertion good for years is remembered for a day
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            -- the schema takes any year up to 9999, and an entry that never
+            -- lapses is a slot the dict never reclaims
+            ngx.say(login_with("replay", saml_response({
+                id = "forever",
+                conditions = conditions({ not_on_or_after = "9999-12-31T23:59:59Z" }),
+            })))
+            local ttl = ngx.shared.saml_replay:ttl(replay_key("forever"))
+            ngx.say("capped: ", ttl > 86300 and ttl <= 86400)
+        }
+    }
+--- response_body
+302 /
+capped: true
+
+
+=== TEST 40: a full dict leaves the login working and says so
+--- config
+    location /t {
+        content_by_lua_block {
+            local dict = ngx.shared.saml_replay_full
+            dict:flush_all()
+            dict:flush_expired()
+            local filler = string.rep("x", 256)
+            local i, ok, err = 0, true, nil
+            while ok do
+                ok, err = dict:safe_set("filler-" .. i, filler, 600)
+                if ok then i = i + 1 end
+                if i > 5000 then break end
+            end
+            local j = 0
+            while dict:safe_add("small-" .. j, true, 600) do
+                j = j + 1
+                if j > 5000 then break end
+            end
+            ngx.say("full: ", i > 0 and j > 0 and err == "no memory")
+
+            -- evicting would take the record away from whoever holds it and
+            -- report it against this request, so this login goes untracked
+            ngx.say(login_with("replay_full", saml_response({ id = "untracked" })))
+        }
+    }
+--- response_body
+full: true
+302 /
+--- error_log
+in saml_replay_full: no memory, this login is not covered by replay tracking
+
+
+=== TEST 41: a login refused after the checks leaves the assertion unspent
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            -- idp_issuers refuses this one below where the record used to be
+            -- written, so writing it early told the retry it was a replay
+            local xml = saml_response({ id = "unspent" })
+            ngx.say(login_with("replay_pinned", xml))
+            ngx.say("remembered: ", ngx.shared.saml_replay:get(replay_key("unspent")) ~= nil)
+            ngx.say(login_with("replay", xml))
+        }
+    }
+--- response_body
+401 nil
+remembered: false
+302 /
+--- error_log
+unexpected issuer in response from IdP
+
+
+=== TEST 42: a response refused part way spends none of its assertions
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            -- one signature over the whole Response, so it carries two
+            -- assertions and the reader draws identity from both
+            local spent = sign_doc(response(assertion({ id = "pair-b" })))
+            ngx.say(login_with("replay", spent))
+
+            local pair = sign_doc(response(
+                assertion({ id = "pair-a" }) .. assertion({ id = "pair-b" })))
+            ngx.say(login_with("replay", pair))
+            ngx.say("remembered: ", ngx.shared.saml_replay:get(replay_key("pair-a")) ~= nil)
+
+            ngx.say(login_with("replay", sign_doc(response(assertion({ id = "pair-a" })))))
+        }
+    }
+--- response_body
+302 /
+401 nil
+remembered: false
+302 /
+--- error_log
+assertion pair-b has been presented already
+
+
+=== TEST 43: replay configuration is weighed when the SP is built
+--- config
+    location /t {
+        content_by_lua_block {
+            local resty_saml = require("resty.saml")
+            local function build(extra, drop)
+                local opts = {
+                    sp_issuer = "sp",
+                    idp_uri = "http://127.0.0.1:1984/idp",
+                    login_callback_uri = "/acs",
+                    sp_cert = CERT_PEM,
+                    sp_private_key = KEY_PEM,
+                    idp_cert = CERT_PEM,
+                    secret = "very-secret-key-that-is-32-byte!",
+                }
+                for k, v in pairs(extra) do opts[k] = v end
+                if drop then opts[drop] = nil end
+                local ok, err = pcall(resty_saml.new, opts)
+                return ok and "built" or err:gsub("^.-:%d+: ", "")
+            end
+
+            ngx.say(build({ replay_dict = true }))
+            ngx.say(build({ replay_dict = "no-such-dict" }))
+            ngx.say(build({ replay_dict = "saml_replay" }, "sp_issuer"))
+            -- zero means never expire to lua_shared_dict, and text is what a
+            -- YAML or environment config path hands over
+            ngx.say(build({ replay_dict = "saml_replay", replay_ttl = 0 }))
+            ngx.say(build({ replay_dict = "saml_replay", replay_ttl = "600" }))
+            ngx.say(build({ replay_dict = "saml_replay", replay_ttl = 90 }))
+        }
+    }
+--- response_body
+replay_dict must be the name of a lua_shared_dict
+no lua_shared_dict named no-such-dict
+sp_issuer must be a string to track assertions
+replay_ttl must be a positive number of seconds
+replay_ttl must be a positive number of seconds
+built
+
+
+=== TEST 44: a confirmation bound this parser will not take is skipped
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            -- an offset rather than Z is legal xs:dateTime and refused here, so
+            -- that confirmation is unsatisfiable and the login rides on the
+            -- other one. Refusing on it would let replay_dict decide who is let
+            -- in, which is what the option must never do.
+            ngx.say(login_with("replay", function(request_id)
+                return saml_response({
+                    id = "unreadable-bound",
+                    confirmations = confirmation({
+                        recipient = ACS, not_on_or_after = at(600),
+                        in_response_to = request_id,
+                    }) .. confirmation({
+                        recipient = ACS, not_on_or_after = "2030-01-01T00:00:00+00:00",
+                        in_response_to = request_id,
+                    }),
+                }, ACS, request_id)
+            end))
+            local ttl = ngx.shared.saml_replay:ttl(replay_key("unreadable-bound"))
+            ngx.say("tracked: ", ttl > 600 and ttl <= 660)
+        }
+    }
+--- response_body
+302 /
+tracked: true
+
+
+=== TEST 45: a confirmation naming no close keeps the fallback in charge
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            -- the dated sibling gives out in a minute; the dateless one never
+            -- does, so it decides, and the record falls to replay_ttl rather
+            -- than to the shortest date in sight
+            ngx.say(login_with("replay", function(request_id)
+                return saml_response({
+                    id = "never-gives-out",
+                    confirmations = confirmation({
+                        recipient = ACS, not_on_or_after = at(60),
+                        in_response_to = request_id,
+                    }) .. confirmation({
+                        recipient = ACS, in_response_to = request_id,
+                    }),
+                }, ACS, request_id)
+            end))
+            local ttl = ngx.shared.saml_replay:ttl(replay_key("never-gives-out"))
+            ngx.say("fallback: ", ttl > 590 and ttl <= 600)
+        }
+    }
+--- response_body
+302 /
+fallback: true
+
+
+=== TEST 46: acceptance ends at whichever close comes first
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            -- the Conditions window and the confirmations combine as an AND,
+            -- so the Conditions closing first is when acceptance ends
+            ngx.say(login_with("replay", function(request_id)
+                return saml_response({
+                    id = "conditions-first",
+                    conditions = conditions({ not_on_or_after = at(300) }),
+                    confirmations = confirmation({
+                        recipient = ACS, not_on_or_after = at(3600),
+                        in_response_to = request_id,
+                    }),
+                }, ACS, request_id)
+            end))
+            local ttl = ngx.shared.saml_replay:ttl(replay_key("conditions-first"))
+            ngx.say("earlier: ", ttl > 300 and ttl <= 360)
+        }
+    }
+--- response_body
+302 /
+earlier: true
+
+
+=== TEST 47: a confirmation that cannot confirm here has no say in the record
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            -- the dateless one is addressed elsewhere, so it can never keep
+            -- this assertion alive here and does not unbound the record
+            ngx.say(login_with("replay", function(request_id)
+                return saml_response({
+                    id = "elsewhere-dateless",
+                    confirmations = confirmation({
+                        recipient = ACS, not_on_or_after = at(3600),
+                        in_response_to = request_id,
+                    }) .. confirmation({
+                        recipient = "https://other-sp.example.com/acs",
+                    }),
+                }, ACS, request_id)
+            end))
+            local ttl = ngx.shared.saml_replay:ttl(replay_key("elsewhere-dateless"))
+            ngx.say("dated one decides: ", ttl > 3600 and ttl <= 3660)
+        }
+    }
+--- response_body
+302 /
+dated one decides: true

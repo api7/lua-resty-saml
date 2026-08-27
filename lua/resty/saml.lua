@@ -320,6 +320,14 @@ end
 -- what stops an assertion minted for another SP in the same federation.
 local DEFAULT_CLOCK_SKEW = 60
 
+-- how long an assertion that sets no expiry of its own is remembered
+local DEFAULT_REPLAY_TTL = 600
+
+-- and how long any assertion is remembered at most, whatever it claims. An
+-- assertion valid for years would pin a slot the dict never reclaims, and
+-- nobody is still trying to complete that login a day later.
+local MAX_REPLAY_TTL = 86400
+
 local function time_bounds_ok(not_before, not_on_or_after, now, skew)
     local opens, closes, err
 
@@ -501,6 +509,118 @@ local function issuers_allowed(allowed, issuers)
     return true
 end
 
+-- The last moment the checks above would still admit the assertion. They
+-- combine as an AND: the Conditions window has to hold, and one confirmation
+-- has to be satisfiable, so acceptance ends at whichever gives out first, the
+-- Conditions close or the last confirmation still standing. Profile 4.1.4.2
+-- puts a bearer assertion's expiry on its confirmation, so a Conditions
+-- carrying nothing but an audience is the profile-minimal shape rather than an
+-- odd one. Nil when nothing bounds acceptance, which replay_ttl stands in for.
+--
+-- Only confirmations that could ever confirm at this SP have a say, the same
+-- ones confirmation_ok weighs, minus the clock: one naming another Recipient
+-- or another request can never keep the assertion alive here, and one whose
+-- close this parser will not take, a legal xs:dateTime carrying an offset
+-- rather than Z, is unsatisfiable in the same way. Reading those as
+-- contributing nothing rather than as unbounded matters in both directions,
+-- since a confirmation naming no close never gives out: one satisfiable such
+-- confirmation means the confirmations impose no limit at all, where the
+-- earlier reading let a shorter sibling shrink the record below what an
+-- absent sibling would have left it.
+local function last_moment_usable(assertion, expected)
+    local notes_close
+    local unbounded = #assertion.subject_confirmations == 0
+    for _, confirmation in ipairs(assertion.subject_confirmations) do
+        local confirms_here = confirmation.recipient == expected.acs_url and
+            (confirmation.in_response_to == nil or
+                confirmation.in_response_to == expected.request_id)
+        if confirms_here then
+            if confirmation.not_on_or_after == nil then
+                unbounded = true
+            else
+                local at = parse_iso8601_utc_time(confirmation.not_on_or_after)
+                if at and (notes_close == nil or at > notes_close) then
+                    notes_close = at
+                end
+            end
+        end
+    end
+    if unbounded then
+        notes_close = nil
+    end
+
+    local conditions_close
+    if assertion.not_on_or_after then
+        conditions_close = parse_iso8601_utc_time(assertion.not_on_or_after)
+    end
+
+    if conditions_close and notes_close then
+        return math.min(conditions_close, notes_close)
+    end
+    return conditions_close or notes_close
+end
+
+
+-- An ID is unique only within the IdP that minted it, and idp_issuers takes a
+-- list, so the two travel together. The SP name keeps instances sharing one
+-- dict apart.
+local function replay_key(opts, assertion)
+    return opts.sp_issuer .. "|" .. (assertion.issuer or "") .. "|" .. assertion.id
+end
+
+
+-- A bearer assertion is good for one login. Nothing above stops the same one
+-- being presented again inside its validity window, so its ID is remembered for
+-- as long as it could still be used and a second presentation is refused.
+--
+-- Called at the last gate rather than beside the checks, so a login the rest of
+-- the callback still refuses leaves the assertion unspent. A dict with no room
+-- leaves this assertion untracked rather than evicting one that is still
+-- protecting somebody else's login, which is what add would do on its own: the
+-- entry it takes belongs to another user, the login it stops protecting is
+-- theirs, and the warning is reported against whoever needed the space.
+local function spend_assertions(dict, opts, assertions, expected, now)
+    local skew = opts.clock_skew or DEFAULT_CLOCK_SKEW
+    local spent = {}
+
+    for _, assertion in ipairs(assertions) do
+        if not assertion.id then
+            return false, "an assertion without an ID cannot be tracked"
+        end
+
+        local ttl = opts.replay_ttl or DEFAULT_REPLAY_TTL
+        local usable_until = last_moment_usable(assertion, expected)
+        if usable_until then
+            ttl = usable_until + skew - now
+        end
+        if ttl < 1 then
+            ttl = 1
+        elseif ttl > MAX_REPLAY_TTL then
+            ttl = MAX_REPLAY_TTL
+        end
+
+        local key = replay_key(opts, assertion)
+        local added, add_err = dict:safe_add(key, true, ttl)
+        if added then
+            spent[#spent + 1] = key
+        elseif add_err == "exists" then
+            -- this response authenticates nobody, so the assertions already
+            -- taken from it are handed back rather than left spent
+            for _, taken in ipairs(spent) do
+                dict:delete(taken)
+            end
+            return false, "assertion " .. assertion.id .. " has been presented already"
+        else
+            ngx.log(ngx.ERR, "could not remember assertion ", loggable(assertion.id), " in ",
+                opts.replay_dict, ": ", add_err,
+                ", this login is not covered by replay tracking")
+        end
+    end
+
+    return true
+end
+
+
 local function login_callback(self, opts)
     local sess = session.start(self.session_config)
 
@@ -584,7 +704,8 @@ local function login_callback(self, opts)
         ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
     end
 
-    local acceptable, reason = assertions_acceptable(opts, assertions, expected, ngx.time())
+    local now = ngx.time()
+    local acceptable, reason = assertions_acceptable(opts, assertions, expected, now)
     if not acceptable then
         ngx.log(ngx.ERR, "response from IdP rejected: ", loggable(reason))
         ngx.exit(ngx.HTTP_UNAUTHORIZED)
@@ -623,6 +744,17 @@ local function login_callback(self, opts)
             os.date("!%Y-%m-%d %TZ", expires))
     end
 
+
+    -- the last gate: everything that can still refuse this login has run, so
+    -- the assertion is spent only where it actually authenticates somebody
+    if self.replay_dict then
+        local unused, used_reason = spend_assertions(self.replay_dict, opts, assertions,
+            expected, now)
+        if not unused then
+            ngx.log(ngx.ERR, "response from IdP rejected: ", loggable(used_reason))
+            ngx.exit(ngx.HTTP_UNAUTHORIZED)
+        end
+    end
 
     sess:set("authenticated", true)
     sess:set("name_id", name_id)
@@ -800,6 +932,30 @@ function _M.new(opts)
     obj.idp_cert_func = function(doc) return idp_cert end
     obj.auth_protocol_binding_method = opts.auth_protocol_binding_method
     obj.idp_issuers = issuer_set(opts.idp_issuers)
+    -- read once, and raised rather than returned so a mistyped name names
+    -- itself. A message built as an argument to assert is built on every
+    -- successful call too, and a non-string one fails on the concatenation
+    -- rather than on the option.
+    if opts.replay_dict ~= nil then
+        if type(opts.replay_dict) ~= "string" then
+            error("replay_dict must be the name of a lua_shared_dict", 2)
+        end
+        obj.replay_dict = ngx.shared[opts.replay_dict]
+        if obj.replay_dict == nil then
+            error("no lua_shared_dict named " .. opts.replay_dict, 2)
+        end
+        -- it is half the key, and tostring would turn a missing one into the
+        -- literal nil that two deployments would then share
+        if type(opts.sp_issuer) ~= "string" then
+            error("sp_issuer must be a string to track assertions", 2)
+        end
+        -- zero means never expire to lua_shared_dict, and a number arriving
+        -- from YAML or the environment as text compares against nothing
+        if opts.replay_ttl ~= nil and
+            (type(opts.replay_ttl) ~= "number" or opts.replay_ttl < 1) then
+            error("replay_ttl must be a positive number of seconds", 2)
+        end
+    end
     local cookie_secure, cookie_same_site
     if opts.auth_protocol_binding_method == "HTTP-POST" then
         cookie_secure = true

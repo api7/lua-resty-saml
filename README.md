@@ -110,9 +110,10 @@ lasts as long as an `AuthnRequest` is outstanding across the upgrade.
 
 #### Remembering assertions
 
-Set `replay_dict` and every assertion this instance accepts is remembered until it
-could no longer be used, so presenting the same one again is refused. Leave it unset
-and assertions go untracked, which is what happened before the option existed.
+Set `replay_dict` and every assertion this instance accepts is remembered for as
+long as it could still be used, within the bounds below, and presenting one that is
+remembered is refused. Leave it unset and assertions go untracked, which is what
+happened before the option existed.
 
 **The guarantee is per instance.** An `lua_shared_dict` is shared between the workers
 of one gateway and nowhere else, so a captured assertion replayed through a load
@@ -132,7 +133,7 @@ somebody else. A response carrying several assertions can end up partly tracked,
 which is the safe direction: a later replay still collides on whichever of them was
 recorded.
 
-**The record is bounded even where acceptance is not.** An assertion that names no
+**The record is bounded even where acceptance is not.** An assertion with no usable
 expiry is remembered for `replay_ttl` and accepted for good, so it is refusable only
 inside that window; one the IdP made valid beyond a day is remembered for the day
 and accepted again past it. Both need an IdP far outside shipped defaults, where

@@ -589,7 +589,7 @@ end
 -- protecting somebody else's login, which is what add would do on its own: the
 -- entry it takes belongs to another user, the login it stops protecting is
 -- theirs, and the warning is reported against whoever needed the space.
-local function spend_assertions(dict, opts, assertions, expected, now)
+local function spend_assertions(dict, dict_name, opts, assertions, expected, now)
     local skew = opts.clock_skew or DEFAULT_CLOCK_SKEW
     local spent = {}
     local warned = {}
@@ -634,7 +634,7 @@ local function spend_assertions(dict, opts, assertions, expected, now)
             return false, "assertion " .. assertion.id .. " has been presented already"
         else
             ngx.log(ngx.ERR, "could not remember assertion ", loggable(assertion.id), " in ",
-                opts.replay_dict, ": ", add_err,
+                dict_name, ": ", add_err,
                 ", this login is not covered by replay tracking",
                 assertion.one_time_use and " though it carries OneTimeUse" or "")
         end
@@ -777,8 +777,8 @@ local function login_callback(self, opts)
     -- the last gate: everything that can still refuse this login has run, so
     -- the assertion is spent only where it actually authenticates somebody
     if self.replay_dict then
-        local unused, used_reason = spend_assertions(self.replay_dict, opts, assertions,
-            expected, now)
+        local unused, used_reason = spend_assertions(self.replay_dict, self.replay_dict_name,
+            opts, assertions, expected, now)
         if not unused then
             ngx.log(ngx.ERR, "response from IdP rejected: ", loggable(used_reason))
             ngx.exit(ngx.HTTP_UNAUTHORIZED)
@@ -973,6 +973,9 @@ function _M.new(opts)
         if obj.replay_dict == nil then
             error("no lua_shared_dict named " .. opts.replay_dict, 2)
         end
+        -- kept beside the handle, so what the ERR names is the zone written
+        -- to, whatever happens to the caller's table afterwards
+        obj.replay_dict_name = opts.replay_dict
         -- it is half the key, and tostring would turn a missing one into the
         -- literal nil that two deployments would then share
         if type(opts.sp_issuer) ~= "string" then

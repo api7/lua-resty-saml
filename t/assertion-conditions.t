@@ -108,6 +108,7 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
             acs = { sp_acs_url = "http://127.0.0.1:1984/acs" },
             replay = { replay_dict = "saml_replay" },
             replay_short = { replay_dict = "saml_replay", replay_ttl = 90 },
+            replay_long = { replay_dict = "saml_replay", replay_ttl = 172800 },
             replay_full = { replay_dict = "saml_replay_full" },
             replay_pinned = {
                 replay_dict = "saml_replay",
@@ -1609,3 +1610,21 @@ assertion rebound has been presented already
 [alert]
 [emerg]
 cannot enforce without replay_dict
+
+
+
+=== TEST 54: the operator's replay_ttl is taken as given, past the day too
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            -- the day cap bounds what the assertion claims; this value is
+            -- nobody's claim but the operator's
+            ngx.say(login_with("replay_long", saml_response({ id = "kept-long" })))
+            local ttl = ngx.shared.saml_replay:ttl(replay_key("kept-long"))
+            ngx.say("kept: ", ttl > 172700 and ttl <= 172800)
+        }
+    }
+--- response_body
+302 /
+kept: true

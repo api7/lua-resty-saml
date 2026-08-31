@@ -325,7 +325,8 @@ local DEFAULT_REPLAY_TTL = 600
 
 -- and how long any assertion is remembered at most, whatever it claims. An
 -- assertion valid for years would pin a slot the dict never reclaims, and
--- nobody is still trying to complete that login a day later.
+-- nobody is still trying to complete that login a day later. It bounds the
+-- IdP's window, never replay_ttl: that one is the operator's own choice
 local MAX_REPLAY_TTL = 86400
 
 local function time_bounds_ok(not_before, not_on_or_after, now, skew)
@@ -604,11 +605,11 @@ local function spend_assertions(dict, dict_name, opts, assertions, expected, now
         local usable_until = last_moment_usable(assertion, expected)
         if usable_until then
             ttl = usable_until + skew - now
-        end
-        if ttl < 1 then
-            ttl = 1
-        elseif ttl > MAX_REPLAY_TTL then
-            ttl = MAX_REPLAY_TTL
+            if ttl < 1 then
+                ttl = 1
+            elseif ttl > MAX_REPLAY_TTL then
+                ttl = MAX_REPLAY_TTL
+            end
         end
 
         -- the record is bounded where acceptance is not, so past it the

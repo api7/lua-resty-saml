@@ -510,19 +510,19 @@ static int read_assertion(xmlDoc* doc, xmlNode* node, saml_assertion_t* a) {
       return -1;
     }
 
+    // answered on its own, so the refusal scan below owes it nothing and
+    // reads the same whatever the order of the conditions
+    a->one_time_use = assertion_child(conditions, "OneTimeUse") != NULL;
+
     for (xmlNode* child = conditions->children; child != NULL; child = child->next) {
-      if (is_assertion_el(child, "OneTimeUse")) {
-        a->one_time_use = 1;
-      }
-      if (child->type == XML_ELEMENT_NODE && !is_known_condition(child) &&
-          a->unknown_condition == NULL) {
+      if (child->type == XML_ELEMENT_NODE && !is_known_condition(child)) {
         // the caller refuses the assertion on this name, so losing it would
-        // let the condition through rather than fail the read. The scan goes
-        // on so what else the assertion carries is read whatever the order
+        // let the condition through rather than fail the read
         a->unknown_condition = xmlStrdup(child->name);
         if (a->unknown_condition == NULL) {
           return -1;
         }
+        break;
       }
     }
 

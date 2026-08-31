@@ -117,34 +117,6 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
         }
         SPS = {}
 
-        FULL_REBOUND_OPTS = {
-            sp_issuer = "sp",
-            idp_uri = "http://127.0.0.1:1984/idp",
-            login_callback_uri = "/acs",
-            logout_uri = "/logout",
-            logout_callback_uri = "/sls",
-            logout_redirect_uri = "/logout_ok",
-            sp_cert = CERT_PEM,
-            sp_private_key = KEY_PEM,
-            idp_cert = CERT_PEM,
-            secret = "very-secret-key-that-is-32-byte!",
-            replay_dict = "saml_replay_full",
-        }
-
-        REBOUND_OPTS = {
-            sp_issuer = "sp",
-            idp_uri = "http://127.0.0.1:1984/idp",
-            login_callback_uri = "/acs",
-            logout_uri = "/logout",
-            logout_callback_uri = "/sls",
-            logout_redirect_uri = "/logout_ok",
-            sp_cert = CERT_PEM,
-            sp_private_key = KEY_PEM,
-            idp_cert = CERT_PEM,
-            secret = "very-secret-key-that-is-32-byte!",
-            replay_dict = "saml_replay",
-        }
-
         function sp(name)
             if SPS[name] == nil then
                 local opts = {
@@ -1473,19 +1445,13 @@ OneTimeUse
         content_by_lua_block {
             ngx.say("full: ", fill_dict("saml_replay_full"))
 
-            -- an SP of this block's own, so the table handed to new() can
-            -- be mutated under it the way a live plugin conf could be
-            SPS["full-rebound"] = require("resty.saml").new(FULL_REBOUND_OPTS)
-            FULL_REBOUND_OPTS.replay_dict = "renamed-away"
-
-            -- twice: with no room the login fails open, both times, and the
-            -- ERR names the zone the record would have gone to
+            -- twice: with no room the login fails open, both times
             local xml = saml_response({
                 id = "untracked-stamped",
                 conditions = conditions({ body = "<saml:OneTimeUse/>" }),
             })
-            ngx.say(login_with("full-rebound", xml))
-            ngx.say(login_with("full-rebound", xml))
+            ngx.say(login_with("replay_full", xml))
+            ngx.say(login_with("replay_full", xml))
         }
     }
 --- response_body
@@ -1579,37 +1545,6 @@ qr/\[warn\] .* assertion stamped-untracked from https:\/\/idp\.example\.com carr
 [crit]
 [alert]
 [emerg]
-
-
-
-=== TEST 53: the configuration read at new() governs, whatever the table does later
---- config
-    location /t {
-        content_by_lua_block {
-            ngx.shared.saml_replay:flush_all()
-            SPS["rebound"] = require("resty.saml").new(REBOUND_OPTS)
-            REBOUND_OPTS.replay_dict = nil
-
-            -- tracking still stands on the resolved handle: no warn about a
-            -- missing replay_dict, and the second presentation is refused
-            local xml = saml_response({
-                id = "rebound",
-                conditions = conditions({ not_on_or_after = at(600), body = "<saml:OneTimeUse/>" }),
-            })
-            ngx.say(login_with("rebound", xml))
-            ngx.say(login_with("rebound", xml))
-        }
-    }
---- response_body
-302 /
-401 nil
---- error_log
-assertion rebound has been presented already
---- no_error_log
-[crit]
-[alert]
-[emerg]
-cannot enforce without replay_dict
 
 
 

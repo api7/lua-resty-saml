@@ -1460,6 +1460,11 @@ full: true
 302 /
 --- error_log eval
 qr/\[error\] .* assertion untracked-stamped from https:\/\/idp\.example\.com in saml_replay_full: no memory, this assertion is not tracked though it carries OneTimeUse/
+--- grep_error_log eval
+qr/could not remember assertion untracked-stamped [^,]*, this assertion is not tracked/
+--- grep_error_log_out
+could not remember assertion untracked-stamped from https://idp.example.com in saml_replay_full: no memory, this assertion is not tracked
+could not remember assertion untracked-stamped from https://idp.example.com in saml_replay_full: no memory, this assertion is not tracked
 --- no_error_log
 [crit]
 [alert]

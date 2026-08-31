@@ -132,18 +132,21 @@ long as that assertion could still be used. A response normally carries one, so 
 taking ten logins a second against an IdP issuing ten-minute assertions holds around
 six thousand entries at once: `1m` is too small for that and a busy deployment wants
 more. A zone with no room leaves that assertion untracked and logs an error naming
-the assertion and the zone, saying too when that assertion carried `OneTimeUse`,
-rather than evicting an entry that is still protecting somebody else. A response carrying several assertions can end up partly tracked,
+the assertion, its issuer and the zone, saying too when it carried `OneTimeUse`
+and that the login is not refused for it, rather than evicting an entry that is
+still protecting somebody else. A response carrying several assertions can end up
+partly tracked,
 which is the safe direction: a later replay still collides on whichever of them was
 recorded.
 
 **The record is bounded even where acceptance is not.** An assertion with no usable
 expiry is remembered for `replay_ttl` and accepted for good, so it is refusable only
-inside that window; one the IdP made valid beyond a day is remembered for the day
-and accepted again past it. Where either happens to an assertion carrying
-`<saml:OneTimeUse/>`, the login says so at `warn` level, since the single use its
-IdP asked for ends with the record. Both need an IdP far outside shipped defaults, where
-the delivery window is minutes and the assertion window at most an hour, and the
+inside that window; one still acceptable more than a day from now is remembered
+for the day and accepted again past it. Where either happens to an assertion
+carrying `<saml:OneTimeUse/>`, the login says so at `warn` level, since the single
+use its IdP asked for ends with the record. Both need an IdP far outside shipped
+defaults, where the delivery window is minutes and the assertion window at most an
+hour, and the
 alternative is a record nothing reclaims. The limit an operator can move is
 `replay_ttl`; the day cap is fixed.
 
@@ -151,9 +154,16 @@ alternative is a record nothing reclaims. The limit an operator can move is
 assertion to ask the SP to keep exactly this record. SAML Core 2.5.1.5 makes the
 condition always valid, a condition on use rather than on validity, so the login goes
 through with or without the option. With it, the assertion is single-use within the
-bounds above, the zone with no room included. Without it, the login is accepted and a line at `warn` level names `replay_dict`,
-so an IdP that asks for this is the signal to set it; a deployment logging at `error`
-or above does not see it.
+bounds above — a zone with no room among them. Without it, the login is accepted
+and a line at `warn` level names the assertion, its issuer and `replay_dict`, so an
+IdP that asks for this is the signal to set it; a deployment logging at `error` or
+above does not see it.
+
+Consuming the assertion into a session is the immediate use Core 2.5.1.5 asks for;
+what the login retains afterwards lives in that session, whose lifetime follows
+`SessionNotOnOrAfter` where the IdP sends it and the session library's own timeouts
+where it does not. `OneTimeUse` does not shorten a session: the profile gives
+session lifetime its own instrument, and this SP honours that one where it is sent.
 
 **One thing it deliberately does not do.** Re-submitting a response that already logged
 in is refused, which is what a browser does when it loses the redirect that ends a

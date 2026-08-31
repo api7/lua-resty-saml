@@ -43,7 +43,7 @@ saml.o: src/*.c src/*.h Makefile
 lua_saml.o: src/lua_saml.c src/*.h Makefile
 	$(CC) -c $(CFLAGS_ALL) -I$(LUA_INCDIR) -Isrc/ -o $@ $<
 
-saml.so: lua_saml.o saml.o $(XMLSEC1_STATIC_LIBS) Makefile
+saml.so: lua_saml.o saml.o Makefile
 	$(CC) -o $@ lua_saml.o saml.o $(LDFLAGS_ALL)
 
 ### install:      Install the library to runtime

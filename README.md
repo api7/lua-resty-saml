@@ -68,6 +68,10 @@ local saml = resty_saml.new(opts)
 
 `opts` is a table of below items:
 
+`new` keeps `opts` by reference and reads it for the SP's whole life: hand the
+table over and do not mutate it afterwards. An embedder whose configuration table
+is shared or reused passes a copy (`core.table.deepcopy(conf)` in APISIX).
+
 | key      | type | default value      | Description |
 | ----------- | ----------- | ----------- | ----------- |
 | `sp_issuer`      | string       | None      | SP name to access IdP.       |

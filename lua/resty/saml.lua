@@ -978,8 +978,8 @@ function _M.new(opts)
         if obj.replay_dict == nil then
             error("no lua_shared_dict named " .. opts.replay_dict, 2)
         end
-        -- kept beside the handle, so what the ERR names is the zone written
-        -- to, whatever happens to the caller's table afterwards
+        -- the handle carries no name accessor, so the name it was resolved
+        -- from rides beside it for the diagnostics
         obj.replay_dict_name = opts.replay_dict
         -- it is half the key, and tostring would turn a missing one into the
         -- literal nil that two deployments would then share

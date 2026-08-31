@@ -426,6 +426,7 @@ local function assertions_acceptable(opts, assertions, expected, now, replay_dic
         -- one the last gate enforces on, so the two cannot disagree
         if assertion.one_time_use and not replay_dict then
             ngx.log(ngx.WARN, "assertion ", loggable(assertion.id),
+                " from ", loggable(assertion.issuer),
                 " carries OneTimeUse, which this SP cannot enforce without replay_dict")
         end
 
@@ -592,7 +593,7 @@ end
 local function spend_assertions(dict, dict_name, opts, assertions, expected, now)
     local skew = opts.clock_skew or DEFAULT_CLOCK_SKEW
     local spent = {}
-    local warned = {}
+    local warned
 
     for _, assertion in ipairs(assertions) do
         if not assertion.id then
@@ -621,9 +622,8 @@ local function spend_assertions(dict, dict_name, opts, assertions, expected, now
         if added then
             spent[#spent + 1] = key
             if assertion.one_time_use and outlives then
-                warned[#warned + 1] = "assertion " .. loggable(assertion.id) ..
-                    " carries OneTimeUse but stays acceptable past its record" ..
-                    ", which lapses in " .. ttl .. " seconds"
+                warned = warned or {}
+                warned[#warned + 1] = { id = assertion.id, issuer = assertion.issuer, ttl = ttl }
             end
         elseif add_err == "exists" then
             -- this response authenticates nobody, so the assertions already
@@ -641,9 +641,14 @@ local function spend_assertions(dict, dict_name, opts, assertions, expected, now
     end
 
     -- said only once every record stands: sooner would describe a record the
-    -- add may yet refuse, or one the rollback above takes back
-    for _, message in ipairs(warned) do
-        ngx.log(ngx.WARN, message)
+    -- add may yet refuse, or one the rollback above takes back. The facts are
+    -- what was kept, so the line is built only where the level prints it
+    if warned then
+        for _, w in ipairs(warned) do
+            ngx.log(ngx.WARN, "assertion ", loggable(w.id), " from ", loggable(w.issuer),
+                " carries OneTimeUse but stays acceptable past its record, which lapses in ",
+                w.ttl, " seconds")
+        end
     end
     return true
 end

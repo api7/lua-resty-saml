@@ -621,7 +621,7 @@ offers no subject confirmation this SP can satisfy
 302 /
 401 nil
 --- error_log eval
-[qr/\[warn\] .* assertion single carries OneTimeUse, which this SP cannot enforce without replay_dict/,
+[qr/\[warn\] .* assertion single from https:\/\/idp\.example\.com carries OneTimeUse, which this SP cannot enforce without replay_dict/,
 qr/carries a condition this SP cannot satisfy: Condition/]
 
 
@@ -1529,8 +1529,8 @@ stays acceptable past its record
 302 /
 302 /
 --- error_log eval
-[qr/\[warn\] .* assertion stamped-unbounded carries OneTimeUse but stays acceptable past its record, which lapses in 600 seconds/,
-qr/\[warn\] .* assertion stamped-forever carries OneTimeUse but stays acceptable past its record, which lapses in 86400 seconds/]
+[qr/\[warn\] .* assertion stamped-unbounded from https:\/\/idp\.example\.com carries OneTimeUse but stays acceptable past its record, which lapses in 600 seconds/,
+qr/\[warn\] .* assertion stamped-forever from https:\/\/idp\.example\.com carries OneTimeUse but stays acceptable past its record, which lapses in 86400 seconds/]
 --- no_error_log
 [error]
 [crit]
@@ -1578,7 +1578,7 @@ one_time_use=true unknown_condition=Condition
 302 /
 302 /
 --- error_log eval
-qr/\[warn\] .* assertion stamped-untracked carries OneTimeUse, which this SP cannot enforce without replay_dict/
+qr/\[warn\] .* assertion stamped-untracked from https:\/\/idp\.example\.com carries OneTimeUse, which this SP cannot enforce without replay_dict/
 --- no_error_log
 [error]
 [crit]

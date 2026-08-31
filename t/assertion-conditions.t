@@ -1531,6 +1531,11 @@ stays acceptable past its record
 --- error_log eval
 [qr/\[warn\] .* assertion stamped-unbounded carries OneTimeUse but stays acceptable past its record, which lapses in 600 seconds/,
 qr/\[warn\] .* assertion stamped-forever carries OneTimeUse but stays acceptable past its record, which lapses in 86400 seconds/]
+--- no_error_log
+[error]
+[crit]
+[alert]
+[emerg]
 
 
 
@@ -1574,6 +1579,11 @@ one_time_use=true unknown_condition=Condition
 302 /
 --- error_log eval
 qr/\[warn\] .* assertion stamped-untracked carries OneTimeUse, which this SP cannot enforce without replay_dict/
+--- no_error_log
+[error]
+[crit]
+[alert]
+[emerg]
 
 
 

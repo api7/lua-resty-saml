@@ -1156,6 +1156,9 @@ configured: true
 --- response_body
 302 /
 capped: true
+--- no_error_log
+[error]
+stays acceptable past its record
 
 
 === TEST 40: a full dict leaves the login working and says so
@@ -1335,6 +1338,9 @@ tracked: true
 --- response_body
 302 /
 fallback: true
+--- no_error_log
+[error]
+stays acceptable past its record
 
 
 === TEST 46: acceptance ends at whichever close comes first

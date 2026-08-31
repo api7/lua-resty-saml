@@ -37,14 +37,14 @@ test: build deps/
 clean:
 	rm -rf *.so *.o xmlsec1-$(XMLSEC_VER)*
 
-saml.o: src/*.c src/*.h
+saml.o: src/*.c src/*.h Makefile
 	$(CC) -c $(CFLAGS_ALL) -o saml.o src/saml.c
 
-lua_saml.o: src/lua_saml.c src/*.h
+lua_saml.o: src/lua_saml.c src/*.h Makefile
 	$(CC) -c $(CFLAGS_ALL) -I$(LUA_INCDIR) -Isrc/ -o $@ $<
 
-saml.so: lua_saml.o saml.o
-	$(CC) -o $@ $^ $(LDFLAGS_ALL)
+saml.so: lua_saml.o saml.o $(XMLSEC1_STATIC_LIBS) Makefile
+	$(CC) -o $@ lua_saml.o saml.o $(LDFLAGS_ALL)
 
 ### install:      Install the library to runtime
 .PHONY: install

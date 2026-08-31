@@ -1192,6 +1192,11 @@ full: true
 302 /
 --- error_log
 in saml_replay_full: no memory, this login is not covered by replay tracking
+--- no_error_log
+[crit]
+[alert]
+[emerg]
+though it carries OneTimeUse
 
 
 === TEST 41: a login refused after the checks leaves the assertion unspent

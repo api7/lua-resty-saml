@@ -1219,7 +1219,7 @@ stays acceptable past its record
 full: true
 302 /
 --- error_log
-in saml_replay_full: no memory, this login is not covered by replay tracking
+assertion untracked from https://idp.example.com in saml_replay_full: no memory, this assertion is not tracked
 --- no_error_log
 [crit]
 [alert]
@@ -1498,7 +1498,7 @@ OneTimeUse
 302 /
 302 /
 --- error_log
-in saml_replay_full: no memory, this login is not covered by replay tracking though it carries OneTimeUse
+assertion untracked-stamped from https://idp.example.com in saml_replay_full: no memory, this assertion is not tracked though it carries OneTimeUse
 --- no_error_log
 [crit]
 [alert]

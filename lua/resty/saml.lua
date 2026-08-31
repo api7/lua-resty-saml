@@ -633,9 +633,9 @@ local function spend_assertions(dict, dict_name, opts, assertions, expected, now
             end
             return false, "assertion " .. assertion.id .. " has been presented already"
         else
-            ngx.log(ngx.ERR, "could not remember assertion ", loggable(assertion.id), " in ",
-                dict_name, ": ", add_err,
-                ", this login is not covered by replay tracking",
+            ngx.log(ngx.ERR, "could not remember assertion ", loggable(assertion.id),
+                " from ", loggable(assertion.issuer), " in ", dict_name, ": ", add_err,
+                ", this assertion is not tracked",
                 assertion.one_time_use and " though it carries OneTimeUse" or "")
         end
     end

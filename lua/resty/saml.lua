@@ -592,6 +592,7 @@ end
 local function spend_assertions(dict, opts, assertions, expected, now)
     local skew = opts.clock_skew or DEFAULT_CLOCK_SKEW
     local spent = {}
+    local warned = {}
 
     for _, assertion in ipairs(assertions) do
         if not assertion.id then
@@ -614,16 +615,16 @@ local function spend_assertions(dict, opts, assertions, expected, now)
         -- told, since it is the IdP's window that made the record fall short.
         -- Weighed before the clamp: a window of exactly the cap is covered
         local outlives = usable_until == nil or usable_until + skew - now > MAX_REPLAY_TTL
-        if assertion.one_time_use and outlives then
-            ngx.log(ngx.WARN, "assertion ", loggable(assertion.id),
-                " carries OneTimeUse but stays acceptable past its record, which lapses in ",
-                ttl, " seconds")
-        end
 
         local key = replay_key(opts, assertion)
         local added, add_err = dict:safe_add(key, true, ttl)
         if added then
             spent[#spent + 1] = key
+            if assertion.one_time_use and outlives then
+                warned[#warned + 1] = "assertion " .. loggable(assertion.id) ..
+                    " carries OneTimeUse but stays acceptable past its record" ..
+                    ", which lapses in " .. ttl .. " seconds"
+            end
         elseif add_err == "exists" then
             -- this response authenticates nobody, so the assertions already
             -- taken from it are handed back rather than left spent
@@ -639,6 +640,11 @@ local function spend_assertions(dict, opts, assertions, expected, now)
         end
     end
 
+    -- said only once every record stands: sooner would describe a record the
+    -- add may yet refuse, or one the rollback above takes back
+    for _, message in ipairs(warned) do
+        ngx.log(ngx.WARN, message)
+    end
     return true
 end
 

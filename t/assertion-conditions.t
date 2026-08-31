@@ -1450,6 +1450,11 @@ OneTimeUse
 302 /
 --- error_log
 in saml_replay_full: no memory, this login is not covered by replay tracking though it carries OneTimeUse
+--- no_error_log
+[crit]
+[alert]
+[emerg]
+stays acceptable past its record
 
 
 

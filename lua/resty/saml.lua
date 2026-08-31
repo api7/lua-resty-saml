@@ -427,7 +427,7 @@ local function assertions_acceptable(opts, assertions, expected, now, replay_dic
         -- one the last gate enforces on, so the two cannot disagree
         if assertion.one_time_use and not replay_dict then
             ngx.log(ngx.WARN, "assertion ", loggable(assertion.id),
-                " from ", loggable(assertion.issuer),
+                " from ", loggable(assertion.issuer or ""),
                 " carries OneTimeUse, which this SP cannot enforce without replay_dict")
         end
 
@@ -615,8 +615,9 @@ local function spend_assertions(dict, dict_name, opts, assertions, expected, now
         -- the record is bounded where acceptance is not, so past it the
         -- assertion is accepted again. An IdP that asked for single use is
         -- told, since it is the IdP's window that made the record fall short.
-        -- Weighed before the clamp: a window of exactly the cap is covered
-        local outlives = usable_until == nil or usable_until + skew - now > MAX_REPLAY_TTL
+        -- Stated as the property itself, the stored record falling short of
+        -- the lifetime, so no revision of the clamp can leave this line behind
+        local outlives = usable_until == nil or ttl < usable_until + skew - now
 
         local key = replay_key(opts, assertion)
         local added, add_err = dict:safe_add(key, true, ttl)
@@ -635,18 +636,18 @@ local function spend_assertions(dict, dict_name, opts, assertions, expected, now
             return false, "assertion " .. assertion.id .. " has been presented already"
         else
             ngx.log(ngx.ERR, "could not remember assertion ", loggable(assertion.id),
-                " from ", loggable(assertion.issuer), " in ", dict_name, ": ", add_err,
+                " from ", loggable(assertion.issuer or ""), " in ", dict_name, ": ", add_err,
                 ", this assertion is not tracked",
-                assertion.one_time_use and " though it carries OneTimeUse" or "")
+                assertion.one_time_use and " though it carries OneTimeUse" or "",
+                ", and the login is not refused for it")
         end
     end
 
-    -- said only once every record stands: sooner would describe a record the
-    -- add may yet refuse, or one the rollback above takes back. The facts are
-    -- what was kept, so the line is built only where the level prints it
+    -- said only once every record stands: a warn spoken sooner would describe
+    -- a record the rollback above may yet take back
     if warned then
         for _, w in ipairs(warned) do
-            ngx.log(ngx.WARN, "assertion ", loggable(w.id), " from ", loggable(w.issuer),
+            ngx.log(ngx.WARN, "assertion ", loggable(w.id), " from ", loggable(w.issuer or ""),
                 " carries OneTimeUse but stays acceptable past its record, which lapses in ",
                 w.ttl, " seconds")
         end

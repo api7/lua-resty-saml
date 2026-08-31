@@ -645,6 +645,9 @@ response from IdP is addressed to http://evil.example.com/acs
     }
 --- response_body
 302 /
+--- no_error_log
+[error]
+cannot enforce without replay_dict
 
 
 
@@ -1198,7 +1201,7 @@ stays acceptable past its record
 full: true
 302 /
 --- error_log eval
-qr/\[error\] .* assertion untracked from https:\/\/idp\.example\.com in saml_replay_full: no memory, this assertion is not tracked/
+qr/\[error\] .* assertion untracked from https:\/\/idp\.example\.com in saml_replay_full: no memory, this assertion is not tracked, and the login is not refused for it/
 --- no_error_log
 [crit]
 [alert]
@@ -1459,7 +1462,7 @@ full: true
 302 /
 302 /
 --- error_log eval
-qr/\[error\] .* assertion untracked-stamped from https:\/\/idp\.example\.com in saml_replay_full: no memory, this assertion is not tracked though it carries OneTimeUse/
+qr/\[error\] .* assertion untracked-stamped from https:\/\/idp\.example\.com in saml_replay_full: no memory, this assertion is not tracked though it carries OneTimeUse, and the login is not refused for it/
 --- grep_error_log eval
 qr/could not remember assertion untracked-stamped [^,]*, this assertion is not tracked/
 --- grep_error_log_out
@@ -1511,7 +1514,8 @@ qr/\[warn\] .* assertion stamped-forever from https:\/\/idp\.example\.com carrie
         content_by_lua_block {
             local unknown = '<saml:Condition xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ' ..
                 'xsi:type="saml:AudienceRestrictionType"><saml:Audience>sp</saml:Audience></saml:Condition>'
-            for _, body in ipairs({ "<saml:OneTimeUse/>" .. unknown, unknown .. "<saml:OneTimeUse/>" }) do
+            for _, body in ipairs({ "<saml:OneTimeUse/>" .. unknown, unknown .. "<saml:OneTimeUse/>",
+                unknown }) do
                 local doc, err = parse(sign_doc(response(assertion({
                     id = "ordered", conditions = conditions({ body = body }),
                 }))))
@@ -1525,6 +1529,7 @@ qr/\[warn\] .* assertion stamped-forever from https:\/\/idp\.example\.com carrie
 --- response_body
 one_time_use=true unknown_condition=Condition
 one_time_use=true unknown_condition=Condition
+one_time_use=false unknown_condition=Condition
 
 
 

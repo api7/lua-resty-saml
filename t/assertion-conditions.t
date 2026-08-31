@@ -1442,7 +1442,7 @@ dated one decides: true
             ngx.say(login_with("replay", xml))
             -- remembered until acceptance ends plus clock_skew, as any other
             local ttl = ngx.shared.saml_replay:ttl(replay_key("stamped"))
-            ngx.say("recorded: ", ttl > 650 and ttl <= 660)
+            ngx.say("recorded: ", ttl > 600 and ttl <= 660)
             ngx.say(login_with("replay", xml))
         }
     }

@@ -1218,8 +1218,8 @@ stays acceptable past its record
 --- response_body
 full: true
 302 /
---- error_log
-assertion untracked from https://idp.example.com in saml_replay_full: no memory, this assertion is not tracked
+--- error_log eval
+qr/\[error\] .* assertion untracked from https:\/\/idp\.example\.com in saml_replay_full: no memory, this assertion is not tracked/
 --- no_error_log
 [crit]
 [alert]
@@ -1497,8 +1497,8 @@ OneTimeUse
 --- response_body
 302 /
 302 /
---- error_log
-assertion untracked-stamped from https://idp.example.com in saml_replay_full: no memory, this assertion is not tracked though it carries OneTimeUse
+--- error_log eval
+qr/\[error\] .* assertion untracked-stamped from https:\/\/idp\.example\.com in saml_replay_full: no memory, this assertion is not tracked though it carries OneTimeUse/
 --- no_error_log
 [crit]
 [alert]

@@ -265,6 +265,27 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
 
         -- the module owns this layout; naming it once here keeps a change to
         -- the scheme from surfacing as a comparison against nil
+        -- fill a zone to refusal, so the next safe_add answers no memory.
+        -- Hands back whether it truly got there, for the block to assert
+        function fill_dict(name)
+            local dict = ngx.shared[name]
+            dict:flush_all()
+            dict:flush_expired()
+            local filler = string.rep("x", 256)
+            local i, ok, err = 0, true, nil
+            while ok do
+                ok, err = dict:safe_set("filler-" .. i, filler, 600)
+                if ok then i = i + 1 end
+                if i > 5000 then break end
+            end
+            local j = 0
+            while dict:safe_add("small-" .. j, true, 600) do
+                j = j + 1
+                if j > 5000 then break end
+            end
+            return i > 0 and j > 0 and err == "no memory"
+        end
+
         function replay_key(id, issuer)
             return "sp|" .. (issuer or IDP) .. "|" .. id
         end
@@ -1193,22 +1214,7 @@ stays acceptable past its record
 --- config
     location /t {
         content_by_lua_block {
-            local dict = ngx.shared.saml_replay_full
-            dict:flush_all()
-            dict:flush_expired()
-            local filler = string.rep("x", 256)
-            local i, ok, err = 0, true, nil
-            while ok do
-                ok, err = dict:safe_set("filler-" .. i, filler, 600)
-                if ok then i = i + 1 end
-                if i > 5000 then break end
-            end
-            local j = 0
-            while dict:safe_add("small-" .. j, true, 600) do
-                j = j + 1
-                if j > 5000 then break end
-            end
-            ngx.say("full: ", i > 0 and j > 0 and err == "no memory")
+            ngx.say("full: ", fill_dict("saml_replay_full"))
 
             -- evicting would take the record away from whoever holds it and
             -- report it against this request, so this login goes untracked
@@ -1464,21 +1470,8 @@ OneTimeUse
 --- config
     location /t {
         content_by_lua_block {
-            local dict = ngx.shared.saml_replay_full
-            dict:flush_all()
-            dict:flush_expired()
-            local filler = string.rep("x", 256)
-            local i, ok = 0, true
-            while ok do
-                ok = dict:safe_set("filler-" .. i, filler, 600)
-                if ok then i = i + 1 end
-                if i > 5000 then break end
-            end
-            local j = 0
-            while dict:safe_add("small-" .. j, true, 600) do
-                j = j + 1
-                if j > 5000 then break end
-            end
+            ngx.say("full: ", fill_dict("saml_replay_full"))
+
             -- an SP of this block's own, so the table handed to new() can
             -- be mutated under it the way a live plugin conf could be
             SPS["full-rebound"] = require("resty.saml").new(FULL_REBOUND_OPTS)
@@ -1495,6 +1488,7 @@ OneTimeUse
         }
     }
 --- response_body
+full: true
 302 /
 302 /
 --- error_log eval

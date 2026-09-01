@@ -34,6 +34,9 @@ _EOC_
     my $http_config = $block->http_config // <<_EOC_;
     lua_package_path '$pwd/lua/?.lua;$pwd/deps/share/lua/5.1/?.lua;$pwd/t/?.lua;;';
     lua_package_cpath '$pwd/?.so;$pwd/deps/lib/lua/5.1/?.so;;';
+    large_client_header_buffers 4 64k;
+    client_max_body_size 1m;
+    client_body_buffer_size 128k;
 
     # a zone of the same name and size is reused across a reload, so entries
     # outlive the block that made them under TEST_NGINX_USE_HUP=1. Blocks name
@@ -113,6 +116,8 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
                 replay_dict = "saml_replay",
                 idp_issuers = { "https://elsewhere.example.com" },
             },
+            save_fails_start = {},
+            save_fails_replay = { replay_dict = "saml_replay" },
         }
         SPS = {}
 
@@ -132,6 +137,9 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
                 }
                 for k, v in pairs(OPTS[name]) do opts[k] = v end
                 SPS[name] = require("resty.saml").new(opts)
+                if name == "save_fails_start" or name == "save_fails_replay" then
+                    SPS[name].session_config.compression_threshold = 0
+                end
             end
             return SPS[name]
         end
@@ -205,7 +213,7 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
                 '<saml:Subject><saml:NameID>%s</saml:NameID>%s</saml:Subject>%s%s</saml:Assertion>',
                 spec.id or "a1", spec.issuer or IDP, spec.name_id or "signed\@example.com",
                 spec.confirmations or "", spec.conditions or "",
-                authn_statement(spec.session_expires))
+                authn_statement(spec.session_expires) .. (spec.attributes or ""))
         end
 
         function response(body, destination, in_response_to)
@@ -278,6 +286,16 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
             })
             if not res then return "callback request: " .. err end
             return res.status .. " " .. tostring(res.headers["Location"])
+        end
+
+        function login_start_with_large_uri()
+            local bits = {}
+            for i = 1, 1200 do bits[i] = ngx.md5(i) end
+            local res = assert(require("resty.http").new():request_uri(
+                "http://127.0.0.1:1984/?q=" .. table.concat(bits), {
+                    headers = { ["X-Test-SP"] = "save_fails_start" },
+                }))
+            return res.status
         end
 
         -- hand a response to a session the old code would have left behind
@@ -1386,3 +1404,40 @@ earlier: true
 --- response_body
 302 /
 dated one decides: true
+
+
+=== TEST 48: a failed login-session save does not redirect to the IdP
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.say(login_start_with_large_uri())
+        }
+    }
+--- response_body
+500
+--- error_log
+could not save login session: cookie size limit exceeded
+
+
+=== TEST 49: a failed authenticated-session save returns replay entries
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            local bits = {}
+            for i = 1, 1200 do bits[i] = ngx.md5(i) end
+            local xml = saml_response({
+                id = "save-failed",
+                attributes = '<saml:AttributeStatement><saml:Attribute Name="large">' ..
+                    '<saml:AttributeValue>' .. table.concat(bits) ..
+                    '</saml:AttributeValue></saml:Attribute></saml:AttributeStatement>',
+            })
+            ngx.say(login_with("save_fails_replay", xml))
+            ngx.say("remembered: ", ngx.shared.saml_replay:get(replay_key("save-failed")) ~= nil)
+        }
+    }
+--- response_body
+500 nil
+remembered: false
+--- error_log
+could not save authenticated session: cookie size limit exceeded

@@ -68,6 +68,10 @@ local saml = resty_saml.new(opts)
 
 `opts` is a table of below items:
 
+`new` keeps `opts` by reference and reads it for the SP's whole life: hand the
+table over and do not mutate it afterwards. An embedder whose configuration table
+is shared or reused passes a copy (`core.table.deepcopy(conf)` in APISIX).
+
 | key      | type | default value      | Description |
 | ----------- | ----------- | ----------- | ----------- |
 | `sp_issuer`      | string       | None      | SP name to access IdP.       |
@@ -84,7 +88,7 @@ local saml = resty_saml.new(opts)
 | `sp_audiences`      | array of strings       | `{ sp_issuer }`      | Audiences this SP answers to. An assertion carrying an `AudienceRestriction` has to name one of them; an assertion carrying none is unrestricted.       |
 | `clock_skew`      | number       | `60`      | Seconds of clock difference tolerated against the IdP when weighing `NotBefore` and `NotOnOrAfter`.       |
 | `replay_dict`      | string       | None      | Name of an `lua_shared_dict` in which to remember the assertions this instance has already accepted, so it accepts none of them twice. Unset leaves them untracked. See [Remembering assertions](#remembering-assertions) for what the zone has to hold and how far the guarantee reaches.       |
-| `replay_ttl`      | number       | `600`      | Seconds to remember an assertion when nothing bounds its acceptance: no `NotOnOrAfter` on its `Conditions` and none on a satisfiable subject confirmation. A bounded one is remembered until acceptance ends, plus `clock_skew`, capped at a day.       |
+| `replay_ttl`      | number       | `600`      | Seconds to remember an assertion when nothing bounds its acceptance: no `NotOnOrAfter` on its `Conditions` and none on a satisfiable subject confirmation. A bounded one is remembered until acceptance ends, plus `clock_skew`, capped at a day or at `replay_ttl` where that is longer.       |
 
 #### Binding a response to the request
 
@@ -128,25 +132,43 @@ long as that assertion could still be used. A response normally carries one, so 
 taking ten logins a second against an IdP issuing ten-minute assertions holds around
 six thousand entries at once: `1m` is too small for that and a busy deployment wants
 more. A zone with no room leaves that assertion untracked and logs an error naming
-the assertion and the zone, rather than evicting an entry that is still protecting
-somebody else. A response carrying several assertions can end up partly tracked,
+the assertion, its issuer and the zone, saying too when it carried `OneTimeUse`,
+rather than evicting an entry that is
+still protecting somebody else. A response carrying several assertions can end up
+partly tracked,
 which is the safe direction: a later replay still collides on whichever of them was
 recorded.
 
 **The record is bounded even where acceptance is not.** An assertion with no usable
 expiry is remembered for `replay_ttl` and accepted for good, so it is refusable only
-inside that window; one the IdP made valid beyond a day is remembered for the day
-and accepted again past it. Both need an IdP far outside shipped defaults, where
-the delivery window is minutes and the assertion window at most an hour, and the
-alternative is a record nothing reclaims. The limit an operator can move is
-`replay_ttl`; the day cap is fixed.
+inside that window; one whose acceptance ends more than a day out, `clock_skew`
+included, is remembered for the day and accepted again past it. Where either happens
+to an assertion carrying `<saml:OneTimeUse/>`, the login says so at `warn` level,
+since the single use its IdP asked for ends with the record. Both need an IdP far
+outside shipped defaults, where the delivery window is minutes and the assertion
+window at most an hour, and the alternative is a record nothing reclaims. The limit
+an operator can move is `replay_ttl`, and raising it past a day raises the cap with
+it: the cap bounds what the IdP's window alone can claim.
 
-**Two things it deliberately does not do.** An assertion carrying `<saml:OneTimeUse/>`
-is still refused outright, so an IdP asking for exactly this protection cannot log in
-even with the option on; that is tracked separately and the two do not meet yet. And
-re-submitting a response that already logged in is refused, which is what a browser
-does when it loses the redirect that ends a login. Returning to the application starts
-a fresh login, and the IdP will not ask for a password again.
+**This is what `<saml:OneTimeUse/>` asks for.** An IdP stamps that condition on an
+assertion to ask the SP to keep exactly this record. SAML Core 2.5.1.5 makes the
+condition always valid, a condition on use rather than on validity, so the login goes
+through with or without the option. With it, the assertion is single-use within the
+bounds above — a zone with no room among them. Without it, the login is accepted
+and a line at `warn` level names the assertion, its issuer and `replay_dict`, so an
+IdP that asks for this is the signal to set it; a deployment logging at `error` or
+above does not see it.
+
+Consuming the assertion into a session is the immediate use Core 2.5.1.5 asks for;
+what the login retains afterwards lives in that session, whose lifetime follows
+`SessionNotOnOrAfter` where the IdP sends it and the session library's own timeouts
+where it does not. `OneTimeUse` does not shorten a session: the profile gives
+session lifetime its own instrument, and this SP honours that one where it is sent.
+
+**One thing it deliberately does not do.** Re-submitting a response that already logged
+in is refused, which is what a browser does when it loses the redirect that ends a
+login. Returning to the application starts a fresh login, and the IdP will not ask for
+a password again.
 
 #### Seeding the worker
 

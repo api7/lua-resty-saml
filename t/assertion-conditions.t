@@ -108,6 +108,7 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
             acs = { sp_acs_url = "http://127.0.0.1:1984/acs" },
             replay = { replay_dict = "saml_replay" },
             replay_short = { replay_dict = "saml_replay", replay_ttl = 90 },
+            replay_long = { replay_dict = "saml_replay", replay_ttl = 172800 },
             replay_full = { replay_dict = "saml_replay_full" },
             replay_pinned = {
                 replay_dict = "saml_replay",
@@ -237,6 +238,27 @@ GnHKA3uj9HpsS6fAxHNPPvWxRjO67Xj8Yw==
 
         -- the module owns this layout; naming it once here keeps a change to
         -- the scheme from surfacing as a comparison against nil
+        -- fill a zone to refusal, so the next safe_add answers no memory.
+        -- Hands back whether it truly got there, for the block to assert
+        function fill_dict(name)
+            local dict = ngx.shared[name]
+            dict:flush_all()
+            dict:flush_expired()
+            local filler = string.rep("x", 256)
+            local i, ok, err = 0, true, nil
+            while ok do
+                ok, err = dict:safe_set("filler-" .. i, filler, 600)
+                if ok then i = i + 1 end
+                if i > 5000 then break end
+            end
+            local j = 0
+            while dict:safe_add("small-" .. j, true, 600) do
+                j = j + 1
+                if j > 5000 then break end
+            end
+            return i > 0 and j > 0 and err == "no memory"
+        end
+
         function replay_key(id, issuer)
             return "sp|" .. (issuer or IDP) .. "|" .. id
         end
@@ -574,9 +596,10 @@ offers no subject confirmation this SP can satisfy
             ngx.say(login_with("plain", saml_response({
                 conditions = conditions({ body = "<saml:ProxyRestriction Count=\"1\"/>" }),
             })))
-            -- OneTimeUse asks this SP to remember which assertions it has spent
+            -- OneTimeUse is always valid (Core 2.5.1.5); with no replay_dict it
+            -- asks for a record this SP does not keep, which is said, not refused
             ngx.say(login_with("plain", saml_response({
-                conditions = conditions({ body = "<saml:OneTimeUse/>" }),
+                id = "single", conditions = conditions({ body = "<saml:OneTimeUse/>" }),
             })))
             -- and a condition it has never heard of asks who knows what
             ngx.say(login_with("plain", saml_response({
@@ -589,10 +612,10 @@ offers no subject confirmation this SP can satisfy
     }
 --- response_body
 302 /
-401 nil
+302 /
 401 nil
 --- error_log eval
-[qr/carries a condition this SP cannot satisfy: OneTimeUse/,
+[qr/\[warn\] .* assertion single from https:\/\/idp\.example\.com carries OneTimeUse, which this SP cannot enforce without replay_dict/,
 qr/carries a condition this SP cannot satisfy: Condition/]
 
 
@@ -622,6 +645,9 @@ response from IdP is addressed to http://evil.example.com/acs
     }
 --- response_body
 302 /
+--- no_error_log
+[error]
+cannot enforce without replay_dict
 
 
 
@@ -631,7 +657,7 @@ response from IdP is addressed to http://evil.example.com/acs
         content_by_lua_block {
             local xml = sign_doc(response(
                 assertion({ id = "a1", conditions = conditions({ not_on_or_after = "2026-07-21T00:00:00Z",
-                    body = audience("sp") }) }) ..
+                    body = audience("sp") .. "<saml:OneTimeUse/>" }) }) ..
                 assertion({ id = "a2", name_id = "second@example.com",
                     confirmations = confirmation({ recipient = ACS }) })))
             local doc, err = parse(xml)
@@ -641,14 +667,15 @@ response from IdP is addressed to http://evil.example.com/acs
                 ngx.say(a.id, " conditions=", tostring(a.has_conditions),
                     " expires=", tostring(a.not_on_or_after),
                     " audiences=", #a.audience_restrictions,
-                    " confirmations=", #a.subject_confirmations)
+                    " confirmations=", #a.subject_confirmations,
+                    " one_time_use=", tostring(a.one_time_use))
             end
             ngx.say("destination: ", tostring(saml.doc_destination(doc)))
         }
     }
 --- response_body
-a1 conditions=true expires=2026-07-21T00:00:00Z audiences=1 confirmations=0
-a2 conditions=false expires=nil audiences=0 confirmations=1
+a1 conditions=true expires=2026-07-21T00:00:00Z audiences=1 confirmations=0 one_time_use=true
+a2 conditions=false expires=nil audiences=0 confirmations=1 one_time_use=false
 destination: nil
 
 
@@ -1154,28 +1181,16 @@ configured: true
 --- response_body
 302 /
 capped: true
+--- no_error_log
+[error]
+stays acceptable past its record
 
 
 === TEST 40: a full dict leaves the login working and says so
 --- config
     location /t {
         content_by_lua_block {
-            local dict = ngx.shared.saml_replay_full
-            dict:flush_all()
-            dict:flush_expired()
-            local filler = string.rep("x", 256)
-            local i, ok, err = 0, true, nil
-            while ok do
-                ok, err = dict:safe_set("filler-" .. i, filler, 600)
-                if ok then i = i + 1 end
-                if i > 5000 then break end
-            end
-            local j = 0
-            while dict:safe_add("small-" .. j, true, 600) do
-                j = j + 1
-                if j > 5000 then break end
-            end
-            ngx.say("full: ", i > 0 and j > 0 and err == "no memory")
+            ngx.say("full: ", fill_dict("saml_replay_full"))
 
             -- evicting would take the record away from whoever holds it and
             -- report it against this request, so this login goes untracked
@@ -1185,8 +1200,13 @@ capped: true
 --- response_body
 full: true
 302 /
---- error_log
-in saml_replay_full: no memory, this login is not covered by replay tracking
+--- error_log eval
+qr/\[error\] .* assertion untracked from https:\/\/idp\.example\.com in saml_replay_full: no memory, this assertion is not tracked/
+--- no_error_log
+[crit]
+[alert]
+[emerg]
+though it carries OneTimeUse
 
 
 === TEST 41: a login refused after the checks leaves the assertion unspent
@@ -1333,6 +1353,9 @@ tracked: true
 --- response_body
 302 /
 fallback: true
+--- no_error_log
+[error]
+stays acceptable past its record
 
 
 === TEST 46: acceptance ends at whichever close comes first
@@ -1386,3 +1409,167 @@ earlier: true
 --- response_body
 302 /
 dated one decides: true
+
+
+
+=== TEST 48: with a record, an OneTimeUse assertion is treated like any other
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            local xml = saml_response({
+                id = "stamped",
+                conditions = conditions({ not_on_or_after = at(600), body = "<saml:OneTimeUse/>" }),
+            })
+            ngx.say(login_with("replay", xml))
+            -- remembered until acceptance ends plus clock_skew, as any other
+            local ttl = ngx.shared.saml_replay:ttl(replay_key("stamped"))
+            ngx.say("recorded: ", ttl > 600 and ttl <= 660)
+            ngx.say(login_with("replay", xml))
+        }
+    }
+--- response_body
+302 /
+recorded: true
+401 nil
+--- error_log
+assertion stamped has been presented already
+--- no_error_log
+[crit]
+[alert]
+[emerg]
+OneTimeUse
+
+
+
+=== TEST 49: a full dict says when the untracked login asked for single use
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.say("full: ", fill_dict("saml_replay_full"))
+
+            -- twice: with no room the login fails open, both times
+            local xml = saml_response({
+                id = "untracked-stamped",
+                conditions = conditions({ body = "<saml:OneTimeUse/>" }),
+            })
+            ngx.say(login_with("replay_full", xml))
+            ngx.say(login_with("replay_full", xml))
+        }
+    }
+--- response_body
+full: true
+302 /
+302 /
+--- error_log eval
+qr/\[error\] .* assertion untracked-stamped from https:\/\/idp\.example\.com in saml_replay_full: no memory, this assertion is not tracked though it carries OneTimeUse/
+--- grep_error_log eval
+qr/could not remember assertion untracked-stamped [^,]*, this assertion is not tracked/
+--- grep_error_log_out
+could not remember assertion untracked-stamped from https://idp.example.com in saml_replay_full: no memory, this assertion is not tracked
+could not remember assertion untracked-stamped from https://idp.example.com in saml_replay_full: no memory, this assertion is not tracked
+--- no_error_log
+[crit]
+[alert]
+[emerg]
+stays acceptable past its record
+
+
+
+=== TEST 50: an OneTimeUse assertion that outlives its record says so
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            -- nothing bounds it, so the record falls back to replay_ttl
+            ngx.say(login_with("replay", saml_response({
+                id = "stamped-unbounded",
+                conditions = conditions({ body = "<saml:OneTimeUse/>" }),
+            })))
+            -- valid for years, so the record is capped at a day
+            ngx.say(login_with("replay", saml_response({
+                id = "stamped-forever",
+                conditions = conditions({ not_on_or_after = "9999-12-31T23:59:59Z",
+                    body = "<saml:OneTimeUse/>" }),
+            })))
+        }
+    }
+--- response_body
+302 /
+302 /
+--- error_log eval
+[qr/\[warn\] .* assertion stamped-unbounded from https:\/\/idp\.example\.com carries OneTimeUse but stays acceptable past its record, which lapses in 600 seconds/,
+qr/\[warn\] .* assertion stamped-forever from https:\/\/idp\.example\.com carries OneTimeUse but stays acceptable past its record, which lapses in 86400 seconds/]
+--- no_error_log
+[error]
+[crit]
+[alert]
+[emerg]
+
+
+
+=== TEST 51: OneTimeUse is read wherever it sits among the conditions
+--- config
+    location /t {
+        content_by_lua_block {
+            local unknown = '<saml:Condition xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ' ..
+                'xsi:type="saml:AudienceRestrictionType"><saml:Audience>sp</saml:Audience></saml:Condition>'
+            for _, body in ipairs({ "<saml:OneTimeUse/>" .. unknown, unknown .. "<saml:OneTimeUse/>",
+                unknown }) do
+                local doc, err = parse(sign_doc(response(assertion({
+                    id = "ordered", conditions = conditions({ body = body }),
+                }))))
+                if err then ngx.say("err: ", err) return end
+                local a = saml.doc_assertions(doc)[1]
+                ngx.say("one_time_use=", tostring(a.one_time_use),
+                    " unknown_condition=", tostring(a.unknown_condition))
+            end
+        }
+    }
+--- response_body
+one_time_use=true unknown_condition=Condition
+one_time_use=true unknown_condition=Condition
+one_time_use=false unknown_condition=Condition
+
+
+
+=== TEST 52: without a record, an OneTimeUse assertion is accepted again
+--- config
+    location /t {
+        content_by_lua_block {
+            local xml = saml_response({
+                id = "stamped-untracked",
+                conditions = conditions({ not_on_or_after = at(600), body = "<saml:OneTimeUse/>" }),
+            })
+            ngx.say(login_with("plain", xml))
+            ngx.say(login_with("plain", xml))
+        }
+    }
+--- response_body
+302 /
+302 /
+--- error_log eval
+qr/\[warn\] .* assertion stamped-untracked from https:\/\/idp\.example\.com carries OneTimeUse, which this SP cannot enforce without replay_dict/
+--- no_error_log
+[error]
+[crit]
+[alert]
+[emerg]
+
+
+
+=== TEST 54: the operator's replay_ttl is taken as given, past the day too
+--- config
+    location /t {
+        content_by_lua_block {
+            ngx.shared.saml_replay:flush_all()
+            -- the day cap bounds what the assertion claims; this value is
+            -- nobody's claim but the operator's
+            ngx.say(login_with("replay_long", saml_response({ id = "kept-long" })))
+            local ttl = ngx.shared.saml_replay:ttl(replay_key("kept-long"))
+            ngx.say("kept: ", ttl > 172700 and ttl <= 172800)
+        }
+    }
+--- response_body
+302 /
+kept: true

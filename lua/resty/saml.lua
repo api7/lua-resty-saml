@@ -323,10 +323,9 @@ local DEFAULT_CLOCK_SKEW = 60
 -- how long an assertion that sets no expiry of its own is remembered
 local DEFAULT_REPLAY_TTL = 600
 
--- and how long any assertion is remembered at most, whatever it claims. An
--- assertion valid for years would pin a slot the dict never reclaims, and
--- nobody is still trying to complete that login a day later. It bounds the
--- IdP's window, never replay_ttl: that one is the operator's own choice
+-- and how long the IdP's own window can hold a slot: an assertion valid for
+-- years would pin one the dict never reclaims. An operator who wants records
+-- past a day raises replay_ttl, which lifts this cap with it
 local MAX_REPLAY_TTL = 86400
 
 local function time_bounds_ok(not_before, not_on_or_after, now, skew)
@@ -602,13 +601,14 @@ local function spend_assertions(dict, dict_name, opts, assertions, expected, now
         end
 
         local ttl = opts.replay_ttl or DEFAULT_REPLAY_TTL
+        local cap = math.max(MAX_REPLAY_TTL, ttl)
         local usable_until = last_moment_usable(assertion, expected)
         if usable_until then
             ttl = usable_until + skew - now
             if ttl < 1 then
                 ttl = 1
-            elseif ttl > MAX_REPLAY_TTL then
-                ttl = MAX_REPLAY_TTL
+            elseif ttl > cap then
+                ttl = cap
             end
         end
 
@@ -638,8 +638,7 @@ local function spend_assertions(dict, dict_name, opts, assertions, expected, now
             ngx.log(ngx.ERR, "could not remember assertion ", loggable(assertion.id),
                 " from ", loggable(assertion.issuer or ""), " in ", dict_name, ": ", add_err,
                 ", this assertion is not tracked",
-                assertion.one_time_use and " though it carries OneTimeUse" or "",
-                ", and the login is not refused for it")
+                assertion.one_time_use and " though it carries OneTimeUse" or "")
         end
     end
 

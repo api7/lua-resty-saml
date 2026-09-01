@@ -88,7 +88,7 @@ is shared or reused passes a copy (`core.table.deepcopy(conf)` in APISIX).
 | `sp_audiences`      | array of strings       | `{ sp_issuer }`      | Audiences this SP answers to. An assertion carrying an `AudienceRestriction` has to name one of them; an assertion carrying none is unrestricted.       |
 | `clock_skew`      | number       | `60`      | Seconds of clock difference tolerated against the IdP when weighing `NotBefore` and `NotOnOrAfter`.       |
 | `replay_dict`      | string       | None      | Name of an `lua_shared_dict` in which to remember the assertions this instance has already accepted, so it accepts none of them twice. Unset leaves them untracked. See [Remembering assertions](#remembering-assertions) for what the zone has to hold and how far the guarantee reaches.       |
-| `replay_ttl`      | number       | `600`      | Seconds to remember an assertion when nothing bounds its acceptance: no `NotOnOrAfter` on its `Conditions` and none on a satisfiable subject confirmation. A bounded one is remembered until acceptance ends, plus `clock_skew`, capped at a day.       |
+| `replay_ttl`      | number       | `600`      | Seconds to remember an assertion when nothing bounds its acceptance: no `NotOnOrAfter` on its `Conditions` and none on a satisfiable subject confirmation. A bounded one is remembered until acceptance ends, plus `clock_skew`, capped at a day or at `replay_ttl` where that is longer.       |
 
 #### Binding a response to the request
 
@@ -132,8 +132,8 @@ long as that assertion could still be used. A response normally carries one, so 
 taking ten logins a second against an IdP issuing ten-minute assertions holds around
 six thousand entries at once: `1m` is too small for that and a busy deployment wants
 more. A zone with no room leaves that assertion untracked and logs an error naming
-the assertion, its issuer and the zone, saying too when it carried `OneTimeUse`
-and that the login is not refused for it, rather than evicting an entry that is
+the assertion, its issuer and the zone, saying too when it carried `OneTimeUse`,
+rather than evicting an entry that is
 still protecting somebody else. A response carrying several assertions can end up
 partly tracked,
 which is the safe direction: a later replay still collides on whichever of them was
@@ -141,14 +141,14 @@ recorded.
 
 **The record is bounded even where acceptance is not.** An assertion with no usable
 expiry is remembered for `replay_ttl` and accepted for good, so it is refusable only
-inside that window; one still acceptable more than a day from now is remembered
-for the day and accepted again past it. Where either happens to an assertion
-carrying `<saml:OneTimeUse/>`, the login says so at `warn` level, since the single
-use its IdP asked for ends with the record. Both need an IdP far outside shipped
-defaults, where the delivery window is minutes and the assertion window at most an
-hour, and the
-alternative is a record nothing reclaims. The limit an operator can move is
-`replay_ttl`; the day cap is fixed.
+inside that window; one whose acceptance ends more than a day out, `clock_skew`
+included, is remembered for the day and accepted again past it. Where either happens
+to an assertion carrying `<saml:OneTimeUse/>`, the login says so at `warn` level,
+since the single use its IdP asked for ends with the record. Both need an IdP far
+outside shipped defaults, where the delivery window is minutes and the assertion
+window at most an hour, and the alternative is a record nothing reclaims. The limit
+an operator can move is `replay_ttl`, and raising it past a day raises the cap with
+it: the cap bounds what the IdP's window alone can claim.
 
 **This is what `<saml:OneTimeUse/>` asks for.** An IdP stamps that condition on an
 assertion to ask the SP to keep exactly this record. SAML Core 2.5.1.5 makes the

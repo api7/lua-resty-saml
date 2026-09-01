@@ -1,8 +1,8 @@
-package = "lua-resty-saml-main"
-version = "0-0"
+package = "lua-resty-saml"
+version = "0.2.6-0"
 source = {
     url = "git://github.com/api7/lua-resty-saml",
-    branch = "main",
+    tag = "v0.2.6"
 }
 
 description = {

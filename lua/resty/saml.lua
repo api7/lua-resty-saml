@@ -327,9 +327,9 @@ local DEFAULT_CLOCK_SKEW = 60
 -- how long an assertion that sets no expiry of its own is remembered
 local DEFAULT_REPLAY_TTL = 600
 
--- and how long any assertion is remembered at most, whatever it claims. An
--- assertion valid for years would pin a slot the dict never reclaims, and
--- nobody is still trying to complete that login a day later.
+-- and how long the IdP's own window can hold a slot: an assertion valid for
+-- years would pin one the dict never reclaims. An operator who wants records
+-- past a day raises replay_ttl, which lifts this cap with it
 local MAX_REPLAY_TTL = 86400
 
 local function time_bounds_ok(not_before, not_on_or_after, now, skew)
@@ -409,7 +409,7 @@ end
 
 -- Every top-level assertion the verified signature left in the document is one
 -- the readers draw identity from, so every one of them has to hold up.
-local function assertions_acceptable(opts, assertions, expected, now)
+local function assertions_acceptable(opts, assertions, expected, now, replay_dict)
     local skew = opts.clock_skew or DEFAULT_CLOCK_SKEW
     local accepted = opts.sp_audiences or { opts.sp_issuer }
 
@@ -421,6 +421,17 @@ local function assertions_acceptable(opts, assertions, expected, now)
         if assertion.unknown_condition then
             return false, where .. "carries a condition this SP cannot satisfy: " ..
                 assertion.unknown_condition
+        end
+
+        -- Core 2.5.1.5: OneTimeUse is always valid, and asks the SP to keep a
+        -- record of the assertions it has spent. replay_dict is that record;
+        -- without it the IdP's request goes unmet, and the operator is told
+        -- what to configure rather than the user refused. The handle is the
+        -- one the last gate enforces on, so the two cannot disagree
+        if assertion.one_time_use and not replay_dict then
+            ngx.log(ngx.WARN, "assertion ", loggable(assertion.id),
+                " from ", loggable(assertion.issuer or ""),
+                " carries OneTimeUse, which this SP cannot enforce without replay_dict")
         end
 
         local ok, err = time_bounds_ok(assertion.not_before, assertion.not_on_or_after, now, skew)
@@ -583,9 +594,10 @@ end
 -- protecting somebody else's login, which is what add would do on its own: the
 -- entry it takes belongs to another user, the login it stops protecting is
 -- theirs, and the warning is reported against whoever needed the space.
-local function spend_assertions(dict, opts, assertions, expected, now)
+local function spend_assertions(dict, dict_name, opts, assertions, expected, now)
     local skew = opts.clock_skew or DEFAULT_CLOCK_SKEW
     local spent = {}
+    local warned
 
     for _, assertion in ipairs(assertions) do
         if not assertion.id then
@@ -593,20 +605,32 @@ local function spend_assertions(dict, opts, assertions, expected, now)
         end
 
         local ttl = opts.replay_ttl or DEFAULT_REPLAY_TTL
+        local cap = math.max(MAX_REPLAY_TTL, ttl)
         local usable_until = last_moment_usable(assertion, expected)
         if usable_until then
             ttl = usable_until + skew - now
+            if ttl < 1 then
+                ttl = 1
+            elseif ttl > cap then
+                ttl = cap
+            end
         end
-        if ttl < 1 then
-            ttl = 1
-        elseif ttl > MAX_REPLAY_TTL then
-            ttl = MAX_REPLAY_TTL
-        end
+
+        -- the record is bounded where acceptance is not, so past it the
+        -- assertion is accepted again. An IdP that asked for single use is
+        -- told, since it is the IdP's window that made the record fall short.
+        -- Stated as the property itself, the stored record falling short of
+        -- the lifetime, so no revision of the clamp can leave this line behind
+        local outlives = usable_until == nil or ttl < usable_until + skew - now
 
         local key = replay_key(opts, assertion)
         local added, add_err = dict:safe_add(key, true, ttl)
         if added then
             spent[#spent + 1] = key
+            if assertion.one_time_use and outlives then
+                warned = warned or {}
+                warned[#warned + 1] = { id = assertion.id, issuer = assertion.issuer, ttl = ttl }
+            end
         elseif add_err == "exists" then
             -- this response authenticates nobody, so the assertions already
             -- taken from it are handed back rather than left spent
@@ -615,12 +639,22 @@ local function spend_assertions(dict, opts, assertions, expected, now)
             end
             return false, "assertion " .. assertion.id .. " has been presented already"
         else
-            ngx.log(ngx.ERR, "could not remember assertion ", loggable(assertion.id), " in ",
-                opts.replay_dict, ": ", add_err,
-                ", this login is not covered by replay tracking")
+            ngx.log(ngx.ERR, "could not remember assertion ", loggable(assertion.id),
+                " from ", loggable(assertion.issuer or ""), " in ", dict_name, ": ", add_err,
+                ", this assertion is not tracked",
+                assertion.one_time_use and " though it carries OneTimeUse" or "")
         end
     end
 
+    -- said only once every record stands: a warn spoken sooner would describe
+    -- a record the rollback above may yet take back
+    if warned then
+        for _, w in ipairs(warned) do
+            ngx.log(ngx.WARN, "assertion ", loggable(w.id), " from ", loggable(w.issuer or ""),
+                " carries OneTimeUse but stays acceptable past its record, which lapses in ",
+                w.ttl, " seconds")
+        end
+    end
     return true, spent
 end
 
@@ -709,7 +743,8 @@ local function login_callback(self, opts)
     end
 
     local now = ngx.time()
-    local acceptable, reason = assertions_acceptable(opts, assertions, expected, now)
+    local acceptable, reason = assertions_acceptable(opts, assertions, expected, now,
+        self.replay_dict)
     if not acceptable then
         ngx.log(ngx.ERR, "response from IdP rejected: ", loggable(reason))
         ngx.exit(ngx.HTTP_UNAUTHORIZED)
@@ -753,8 +788,8 @@ local function login_callback(self, opts)
     -- the assertion is spent only where it actually authenticates somebody
     local spent
     if self.replay_dict then
-        local spent_ok, spent_or_err = spend_assertions(self.replay_dict, opts, assertions,
-            expected, now)
+        local spent_ok, spent_or_err = spend_assertions(self.replay_dict, self.replay_dict_name,
+            opts, assertions, expected, now)
         if not spent_ok then
             ngx.log(ngx.ERR, "response from IdP rejected: ", loggable(spent_or_err))
             ngx.exit(ngx.HTTP_UNAUTHORIZED)
@@ -959,6 +994,9 @@ function _M.new(opts)
         if obj.replay_dict == nil then
             error("no lua_shared_dict named " .. opts.replay_dict, 2)
         end
+        -- the handle carries no name accessor, so the name it was resolved
+        -- from rides beside it for the diagnostics
+        obj.replay_dict_name = opts.replay_dict
         -- it is half the key, and tostring would turn a missing one into the
         -- literal nil that two deployments would then share
         if type(opts.sp_issuer) ~= "string" then

@@ -224,7 +224,11 @@ local function login(self, opts, request_uri)
     sess:set("saml_state", state)
     sess:set("saml_request_id", request_id)
     sess:set("request_uri", request_uri)
-    sess:save()
+    local saved, save_err = sess:save()
+    if not saved then
+        ngx.log(ngx.ERR, "could not save login session: ", save_err)
+        return ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
+    end
 
     local query_str, err = create_redirect(self.sign_key, {
         SAMLRequest = authn_request(opts, request_id),
@@ -651,7 +655,7 @@ local function spend_assertions(dict, dict_name, opts, assertions, expected, now
                 w.ttl, " seconds")
         end
     end
-    return true
+    return true, spent
 end
 
 
@@ -782,13 +786,15 @@ local function login_callback(self, opts)
 
     -- the last gate: everything that can still refuse this login has run, so
     -- the assertion is spent only where it actually authenticates somebody
+    local spent
     if self.replay_dict then
-        local unused, used_reason = spend_assertions(self.replay_dict, self.replay_dict_name,
+        local spent_ok, spent_or_err = spend_assertions(self.replay_dict, self.replay_dict_name,
             opts, assertions, expected, now)
-        if not unused then
-            ngx.log(ngx.ERR, "response from IdP rejected: ", loggable(used_reason))
+        if not spent_ok then
+            ngx.log(ngx.ERR, "response from IdP rejected: ", loggable(spent_or_err))
             ngx.exit(ngx.HTTP_UNAUTHORIZED)
         end
+        spent = spent_or_err
     end
 
     sess:set("authenticated", true)
@@ -802,7 +808,16 @@ local function login_callback(self, opts)
     sess:set("saml_state", nil)
     sess:set("saml_request_id", nil)
     sess:set("request_uri", nil)
-    sess:save()
+    local saved, save_err = sess:save()
+    if not saved then
+        if spent then
+            for _, key in ipairs(spent) do
+                self.replay_dict:delete(key)
+            end
+        end
+        ngx.log(ngx.ERR, "could not save authenticated session: ", save_err)
+        return ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
+    end
 
     ngx.log(ngx.INFO, "login finish: name_id=", loggable(name_id))
 

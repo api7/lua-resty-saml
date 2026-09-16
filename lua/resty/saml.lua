@@ -126,6 +126,15 @@ local function saml_get_redirect_uri(path)
     return scheme .. "://" .. host .. path
 end
 
+-- The endpoint the IdP delivers the response to. A configured value wins over
+-- the one assembled from request headers, which the requester can steer, and it
+-- is what an SP behind a proxy that rewrites neither scheme nor host needs.
+-- The same value is announced to the IdP and enforced on the way back, so the
+-- two cannot drift.
+local function sp_acs_url(opts)
+    return opts.sp_acs_url or saml_get_redirect_uri(opts.login_callback_uri)
+end
+
 local function interp(s, tab)
     return s:gsub('($%b{})', function(w)
         local key = w:sub(3, -2)
@@ -149,13 +158,13 @@ local AUTHN_REQUEST = [[
 </samlp:AuthnRequest>
 ]]
 
-local function authn_request(opts)
+local function authn_request(opts, request_id)
     return interp(AUTHN_REQUEST, {
-        acs_url = saml_get_redirect_uri(opts.login_callback_uri),
+        acs_url = sp_acs_url(opts),
         destination = opts.idp_uri,
         issue_instant = os.date("!%Y-%m-%dT%TZ"),
         issuer = opts.sp_issuer,
-        uuid = generate_saml_id(),
+        uuid = request_id,
         auth_protocol_binding_method = opts.auth_protocol_binding_method,
     })
 end
@@ -180,7 +189,10 @@ local function logout_request(opts, name_id, session_index)
     })
 end
 
-local function login(self, opts)
+-- request_uri is where to return once the IdP answers. It defaults to what is
+-- being asked for, and is passed in when a login is restarted from somewhere
+-- else, where ngx.var.request_uri is that somewhere else.
+local function login(self, opts, request_uri)
     local sess = session.start(self.session_config)
 
     local authenticated = sess:get("authenticated")
@@ -204,14 +216,22 @@ local function login(self, opts)
     end
 
     local state = uuid.generate_v4()
-    local request_uri = ngx.var.request_uri
+    request_uri = request_uri or ngx.var.request_uri
+    -- kept so the callback can tell the answer to this request from the answer
+    -- to some other one
+    local request_id = generate_saml_id()
 
     sess:set("saml_state", state)
+    sess:set("saml_request_id", request_id)
     sess:set("request_uri", request_uri)
-    sess:save()
+    local saved, save_err = sess:save()
+    if not saved then
+        ngx.log(ngx.ERR, "could not save login session: ", save_err)
+        return ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
+    end
 
     local query_str, err = create_redirect(self.sign_key, {
-        SAMLRequest = authn_request(opts),
+        SAMLRequest = authn_request(opts, request_id),
         SigAlg = RSA_SHA_512_HREF,
         RelayState = state,
     })
@@ -225,9 +245,28 @@ local function login(self, opts)
     return ngx.redirect(opts.idp_uri .. "?" .. query_str)
 end
 
+-- Days since 1970-01-01 for a civil date. os.time reads its table as local
+-- time, which would shift every SAML timestamp by the machine's offset.
+local function days_from_civil(year, month, day)
+    if month <= 2 then
+        year = year - 1
+    end
+    local era = math.floor(year / 400)
+    local year_of_era = year - era * 400
+    local day_of_year = math.floor((153 * ((month + 9) % 12) + 2) / 5) + day - 1
+    local day_of_era = year_of_era * 365 + math.floor(year_of_era / 4)
+        - math.floor(year_of_era / 100) + day_of_year
+    return era * 146097 + day_of_era - 719468
+end
+
 local function parse_iso8601_utc_time(str)
     -- NOTE: We accept only 'Z' for timezone.
-    local year_s, month_s, day_s, hour_s, min_s, sec_s = str:match('(%d%d%d%d)-(%d%d)-(%d%d)T(%d%d):(%d%d):(%d%d).*Z')
+    -- Anchored at both ends, so a year the four-digit field cannot hold is
+    -- refused rather than read from part way in: xs:dateTime allows a leading
+    -- minus for BCE, and an unanchored match starts after it and turns 9999 BCE
+    -- into 9999 CE. A fractional second is read and truncated towards the past.
+    local year_s, month_s, day_s, hour_s, min_s, sec_s =
+        str:match('^(%d%d%d%d)-(%d%d)-(%d%d)T(%d%d):(%d%d):(%d%d)%.?%d*Z$')
     if year_s == nil then
         return nil, 'invalid UTC time pattern unmatch'
     end
@@ -255,8 +294,370 @@ local function parse_iso8601_utc_time(str)
     if sec < 0 or 59 < sec then
         return nil, 'invalid sec in UTC time'
     end
-    return os.time{year=year, month=month, day=day, hour=hour, min=min, sec=sec}
+    return days_from_civil(year, month, day) * 86400 + hour * 3600 + min * 60 + sec
 end
+
+
+-- Values lifted out of the IdP's document end up in the error log, which is
+-- read a line at a time. XML folds a literal newline inside an attribute to a
+-- space, but a character reference survives that, and the Response wrapper is
+-- not covered by the signature, so its Destination is whatever the sender
+-- typed. Escape rather than trust any of it to stay on one line.
+-- Every value read out of a SAML message goes through here on its way to a log,
+-- whether or not a signature covers it and whichever message it came from. The
+-- rule is the value's origin, not its type: an attribute the schema constrains
+-- today is one schema revision away from carrying anything.
+local function loggable(value)
+    return (tostring(value):gsub("%c", function(c)
+        return string.format("\\x%02X", c:byte())
+    end))
+end
+
+
+-- A signature says the message came from the IdP. It does not say the assertion
+-- is still good, that it was issued for this SP, or that it may be presented
+-- here. Those live in the assertion's own Conditions and SubjectConfirmation,
+-- and are checked below.
+--
+-- A constraint the IdP left out is not invented: an IdP that sends no
+-- AudienceRestriction keeps working. One the IdP did send is enforced, which is
+-- what stops an assertion minted for another SP in the same federation.
+local DEFAULT_CLOCK_SKEW = 60
+
+-- how long an assertion that sets no expiry of its own is remembered
+local DEFAULT_REPLAY_TTL = 600
+
+-- and how long the IdP's own window can hold a slot: an assertion valid for
+-- years would pin one the dict never reclaims. An operator who wants records
+-- past a day raises replay_ttl, which lifts this cap with it
+local MAX_REPLAY_TTL = 86400
+
+local function time_bounds_ok(not_before, not_on_or_after, now, skew)
+    local opens, closes, err
+
+    if not_before then
+        opens, err = parse_iso8601_utc_time(not_before)
+        if not opens then
+            return false, "carries an unreadable NotBefore " .. not_before .. ": " .. err
+        end
+    end
+
+    if not_on_or_after then
+        closes, err = parse_iso8601_utc_time(not_on_or_after)
+        if not closes then
+            return false, "carries an unreadable NotOnOrAfter " .. not_on_or_after .. ": " .. err
+        end
+    end
+
+    -- A window that opens after it closes is empty on every clock, so the skew
+    -- allowance has no say in it: without this, each end on its own looks
+    -- acceptable and an inversion of up to twice the allowance passes. Strictly
+    -- later rather than not earlier, since a fractional second is truncated away
+    -- and two instants inside one second read as equal.
+    if opens and closes and opens > closes then
+        return false, "opens at " .. not_before .. " and closes at " .. not_on_or_after
+    end
+
+    if opens and now + skew < opens then
+        return false, "is not valid before " .. not_before
+    end
+
+    if closes and now - skew >= closes then
+        return false, "is not valid on or after " .. not_on_or_after
+    end
+
+    return true
+end
+
+
+local function audience_accepted(accepted, audiences)
+    for _, audience in ipairs(audiences) do
+        for _, expected in ipairs(accepted) do
+            if expected == audience then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+
+-- The assertion may be presented to whoever the Recipient names, for as long as
+-- the confirmation data allows. Several confirmations can be offered and any one
+-- of them being satisfiable is enough.
+local function confirmation_ok(confirmation, expected, now, skew)
+    -- Recipient is the only thing a confirmation says about where the assertion
+    -- may be presented, so it has to be there. An absent one, an empty
+    -- SubjectConfirmationData, and one carrying nothing but conditions that
+    -- happen to hold all say the same nothing, and any of them would otherwise
+    -- answer in place of a sibling that binds the assertion somewhere else.
+    if confirmation.recipient ~= expected.acs_url then
+        return false
+    end
+    -- Checked when the IdP names a request, and not demanded. Naming one is
+    -- what profile 4.1.4.2 asks of an IdP answering an AuthnRequest, so an IdP
+    -- that leaves it out is already out of spec, and refusing that trades a
+    -- working login for protection against somebody else's misconfiguration.
+    -- Nothing an attacker sends produces the shape: the value sits inside the
+    -- signature, so it cannot be stripped from a captured assertion.
+    if confirmation.in_response_to and confirmation.in_response_to ~= expected.request_id then
+        return false
+    end
+    return (time_bounds_ok(confirmation.not_before, confirmation.not_on_or_after, now, skew))
+end
+
+
+-- Every top-level assertion the verified signature left in the document is one
+-- the readers draw identity from, so every one of them has to hold up.
+local function assertions_acceptable(opts, assertions, expected, now, replay_dict)
+    local skew = opts.clock_skew or DEFAULT_CLOCK_SKEW
+    local accepted = opts.sp_audiences or { opts.sp_issuer }
+
+    for _, assertion in ipairs(assertions) do
+        local where = "assertion " .. tostring(assertion.id) .. " "
+
+        -- SAML Core 2.5.1: a condition the SP cannot satisfy leaves the
+        -- assertion Indeterminate, which is not a licence to use it
+        if assertion.unknown_condition then
+            return false, where .. "carries a condition this SP cannot satisfy: " ..
+                assertion.unknown_condition
+        end
+
+        -- Core 2.5.1.5: OneTimeUse is always valid, and asks the SP to keep a
+        -- record of the assertions it has spent. replay_dict is that record;
+        -- without it the IdP's request goes unmet, and the operator is told
+        -- what to configure rather than the user refused. The handle is the
+        -- one the last gate enforces on, so the two cannot disagree
+        if assertion.one_time_use and not replay_dict then
+            ngx.log(ngx.WARN, "assertion ", loggable(assertion.id),
+                " from ", loggable(assertion.issuer or ""),
+                " carries OneTimeUse, which this SP cannot enforce without replay_dict")
+        end
+
+        local ok, err = time_bounds_ok(assertion.not_before, assertion.not_on_or_after, now, skew)
+        if not ok then
+            return false, where .. err
+        end
+
+        -- each AudienceRestriction narrows the audience separately, so this SP
+        -- has to be named in all of them
+        for _, restriction in ipairs(assertion.audience_restrictions) do
+            if not audience_accepted(accepted, restriction) then
+                return false, where .. "is restricted to " .. table.concat(restriction, ", ")
+            end
+        end
+
+        local confirmations = assertion.subject_confirmations
+        if #confirmations > 0 then
+            local satisfiable = false
+            for _, confirmation in ipairs(confirmations) do
+                if confirmation_ok(confirmation, expected, now, skew) then
+                    satisfiable = true
+                    break
+                end
+            end
+            if not satisfiable then
+                return false, where .. "offers no subject confirmation this SP can satisfy"
+            end
+        end
+    end
+
+    return true
+end
+
+-- An Issuer is a string in the XML schema, so libxml2 hands back the element
+-- text as written, indentation included. Compare what the two sides mean.
+local function trim(s)
+    return (s:gsub("^%s*(.-)%s*$", "%1"))
+end
+
+-- Read idp_issuers once, into a set. A shape the callback cannot walk is a
+-- configuration mistake, and finding out at construction names the option,
+-- where finding out per request is a 500 or a blanket refusal that blames the
+-- IdP. An empty list stays legal and means what it says: nobody is expected.
+local function issuer_set(issuers)
+    if issuers == nil then
+        return nil
+    end
+
+    local invalid = "idp_issuers must be a list of strings"
+    if type(issuers) ~= "table" then
+        error(invalid, 3)
+    end
+
+    local set, count = {}, 0
+    for i, issuer in pairs(issuers) do
+        if type(i) ~= "number" or i % 1 ~= 0 or i < 1 or type(issuer) ~= "string" then
+            error(invalid, 3)
+        end
+        set[trim(issuer)] = true
+        count = count + 1
+    end
+    -- a gap would leave the entries past it unreachable to ipairs
+    if count ~= #issuers then
+        error(invalid, 3)
+    end
+    return set
+end
+
+-- A valid signature says the message came from the configured key. It does not
+-- say which IdP that key speaks for, so pin the issuer when the caller names
+-- the ones it expects. No list keeps the previous behaviour; a list nothing
+-- matches, an empty one included, admits nobody.
+--
+-- Every assertion is weighed, not just the one the issuer is taken from: a
+-- response may legitimately carry several, and attributes are read from all of
+-- them. A response whose issuers cannot be read vouches for nobody. Returns
+-- what to name in the log alongside a refusal.
+local function issuers_allowed(allowed, issuers)
+    if allowed == nil then
+        return true
+    end
+    if type(issuers) ~= "table" or #issuers == 0 then
+        return false, "none readable"
+    end
+    for _, issuer in ipairs(issuers) do
+        if not allowed[trim(issuer)] then
+            return false, issuer
+        end
+    end
+    return true
+end
+
+-- The last moment the checks above would still admit the assertion. They
+-- combine as an AND: the Conditions window has to hold, and one confirmation
+-- has to be satisfiable, so acceptance ends at whichever gives out first, the
+-- Conditions close or the last confirmation still standing. Profile 4.1.4.2
+-- puts a bearer assertion's expiry on its confirmation, so a Conditions
+-- carrying nothing but an audience is the profile-minimal shape rather than an
+-- odd one. Nil when nothing bounds acceptance, which replay_ttl stands in for.
+--
+-- Only confirmations that could ever confirm at this SP have a say, the same
+-- ones confirmation_ok weighs, minus the clock: one naming another Recipient
+-- or another request can never keep the assertion alive here, and one whose
+-- close this parser will not take, a legal xs:dateTime carrying an offset
+-- rather than Z, is unsatisfiable in the same way. Reading those as
+-- contributing nothing rather than as unbounded matters in both directions,
+-- since a confirmation naming no close never gives out: one satisfiable such
+-- confirmation means the confirmations impose no limit at all, where the
+-- earlier reading let a shorter sibling shrink the record below what an
+-- absent sibling would have left it.
+local function last_moment_usable(assertion, expected)
+    local notes_close
+    local unbounded = #assertion.subject_confirmations == 0
+    for _, confirmation in ipairs(assertion.subject_confirmations) do
+        local confirms_here = confirmation.recipient == expected.acs_url and
+            (confirmation.in_response_to == nil or
+                confirmation.in_response_to == expected.request_id)
+        if confirms_here then
+            if confirmation.not_on_or_after == nil then
+                unbounded = true
+            else
+                local at = parse_iso8601_utc_time(confirmation.not_on_or_after)
+                if at and (notes_close == nil or at > notes_close) then
+                    notes_close = at
+                end
+            end
+        end
+    end
+    if unbounded then
+        notes_close = nil
+    end
+
+    local conditions_close
+    if assertion.not_on_or_after then
+        conditions_close = parse_iso8601_utc_time(assertion.not_on_or_after)
+    end
+
+    if conditions_close and notes_close then
+        return math.min(conditions_close, notes_close)
+    end
+    return conditions_close or notes_close
+end
+
+
+-- An ID is unique only within the IdP that minted it, and idp_issuers takes a
+-- list, so the two travel together. The SP name keeps instances sharing one
+-- dict apart.
+local function replay_key(opts, assertion)
+    return opts.sp_issuer .. "|" .. (assertion.issuer or "") .. "|" .. assertion.id
+end
+
+
+-- A bearer assertion is good for one login. Nothing above stops the same one
+-- being presented again inside its validity window, so its ID is remembered for
+-- as long as it could still be used and a second presentation is refused.
+--
+-- Called at the last gate rather than beside the checks, so a login the rest of
+-- the callback still refuses leaves the assertion unspent. A dict with no room
+-- leaves this assertion untracked rather than evicting one that is still
+-- protecting somebody else's login, which is what add would do on its own: the
+-- entry it takes belongs to another user, the login it stops protecting is
+-- theirs, and the warning is reported against whoever needed the space.
+local function spend_assertions(dict, dict_name, opts, assertions, expected, now)
+    local skew = opts.clock_skew or DEFAULT_CLOCK_SKEW
+    local spent = {}
+    local warned
+
+    for _, assertion in ipairs(assertions) do
+        if not assertion.id then
+            return false, "an assertion without an ID cannot be tracked"
+        end
+
+        local ttl = opts.replay_ttl or DEFAULT_REPLAY_TTL
+        local cap = math.max(MAX_REPLAY_TTL, ttl)
+        local usable_until = last_moment_usable(assertion, expected)
+        if usable_until then
+            ttl = usable_until + skew - now
+            if ttl < 1 then
+                ttl = 1
+            elseif ttl > cap then
+                ttl = cap
+            end
+        end
+
+        -- the record is bounded where acceptance is not, so past it the
+        -- assertion is accepted again. An IdP that asked for single use is
+        -- told, since it is the IdP's window that made the record fall short.
+        -- Stated as the property itself, the stored record falling short of
+        -- the lifetime, so no revision of the clamp can leave this line behind
+        local outlives = usable_until == nil or ttl < usable_until + skew - now
+
+        local key = replay_key(opts, assertion)
+        local added, add_err = dict:safe_add(key, true, ttl)
+        if added then
+            spent[#spent + 1] = key
+            if assertion.one_time_use and outlives then
+                warned = warned or {}
+                warned[#warned + 1] = { id = assertion.id, issuer = assertion.issuer, ttl = ttl }
+            end
+        elseif add_err == "exists" then
+            -- this response authenticates nobody, so the assertions already
+            -- taken from it are handed back rather than left spent
+            for _, taken in ipairs(spent) do
+                dict:delete(taken)
+            end
+            return false, "assertion " .. assertion.id .. " has been presented already"
+        else
+            ngx.log(ngx.ERR, "could not remember assertion ", loggable(assertion.id),
+                " from ", loggable(assertion.issuer or ""), " in ", dict_name, ": ", add_err,
+                ", this assertion is not tracked",
+                assertion.one_time_use and " though it carries OneTimeUse" or "")
+        end
+    end
+
+    -- said only once every record stands: a warn spoken sooner would describe
+    -- a record the rollback above may yet take back
+    if warned then
+        for _, w in ipairs(warned) do
+            ngx.log(ngx.WARN, "assertion ", loggable(w.id), " from ", loggable(w.issuer or ""),
+                " carries OneTimeUse but stays acceptable past its record, which lapses in ",
+                w.ttl, " seconds")
+        end
+    end
+    return true, spent
+end
+
 
 local function login_callback(self, opts)
     local sess = session.start(self.session_config)
@@ -268,6 +669,16 @@ local function login_callback(self, opts)
     end
 
     local request_uri = sess:get("request_uri")
+
+    -- A session minted before this SP kept the ID of the request it issued has
+    -- nothing for the assertion to name, and refusing dead-ends a login that is
+    -- genuinely this user's. Starting over gets a request that is remembered,
+    -- and cannot repeat, since the session it mints carries one.
+    local request_id = sess:get("saml_request_id")
+    if not request_id then
+        ngx.log(ngx.WARN, "session carries no request id, starting the login again")
+        return login(self, opts, request_uri)
+    end
 
     local method = ngx.req.get_method()
     local doc, args, err
@@ -286,13 +697,56 @@ local function login_callback(self, opts)
 
     local status_code = saml.doc_status_code(doc)
     if status_code ~= saml.STATUS_SUCCESS then
-        ngx.log(ngx.ERR, "IdP returned non-success status: ", status_code)
+        ngx.log(ngx.ERR, "IdP returned non-success status: ", loggable(status_code))
         ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
     end
 
     local state = args.RelayState
     if state ~= saml_state then
-        ngx.log(ngx.ERR, "state different: args.state=", state, ", state=", saml_state)
+        ngx.log(ngx.ERR, "state different: args.state=", loggable(state), ", state=", saml_state)
+        ngx.exit(ngx.HTTP_UNAUTHORIZED)
+    end
+
+    local expected = {
+        acs_url = sp_acs_url(opts),
+        request_id = request_id,
+    }
+
+    -- the Response is often left unsigned, so this only catches a stray answer;
+    -- the binding that holds is the one inside the signed assertion below
+    local in_response_to, in_response_to_err = saml.doc_in_response_to(doc)
+    if in_response_to_err then
+        ngx.log(ngx.ERR, "could not read what the response from IdP answers: ",
+            in_response_to_err)
+        ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
+    end
+    if in_response_to and in_response_to ~= expected.request_id then
+        ngx.log(ngx.ERR, "response from IdP answers request ", loggable(in_response_to))
+        ngx.exit(ngx.HTTP_UNAUTHORIZED)
+    end
+
+    local destination, destination_err = saml.doc_destination(doc)
+    if destination_err then
+        ngx.log(ngx.ERR, "could not read the destination of the response from IdP: ",
+            destination_err)
+        ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
+    end
+    if destination and destination ~= expected.acs_url then
+        ngx.log(ngx.ERR, "response from IdP is addressed to ", loggable(destination))
+        ngx.exit(ngx.HTTP_UNAUTHORIZED)
+    end
+
+    local assertions = saml.doc_assertions(doc)
+    if not assertions then
+        ngx.log(ngx.ERR, "could not read the assertions in response from IdP")
+        ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
+    end
+
+    local now = ngx.time()
+    local acceptable, reason = assertions_acceptable(opts, assertions, expected, now,
+        self.replay_dict)
+    if not acceptable then
+        ngx.log(ngx.ERR, "response from IdP rejected: ", loggable(reason))
         ngx.exit(ngx.HTTP_UNAUTHORIZED)
     end
 
@@ -300,6 +754,12 @@ local function login_callback(self, opts)
     local attrs = saml.doc_attrs(doc)
     local name_id = saml.doc_name_id(doc)
     local session_index = saml.doc_session_index(doc)
+
+    local allowed, unexpected = issuers_allowed(self.idp_issuers, saml.doc_issuers(doc))
+    if not allowed then
+        ngx.log(ngx.ERR, "unexpected issuer in response from IdP: ", loggable(unexpected))
+        ngx.exit(ngx.HTTP_UNAUTHORIZED)
+    end
 
     -- a success response the signature leaves without a readable assertion
     -- carries no identity, so there is nobody to authenticate as
@@ -312,13 +772,30 @@ local function login_callback(self, opts)
     local expires
     if session_expires then
         expires, err = parse_iso8601_utc_time(session_expires)
-        ngx.log(ngx.INFO, "login callback: session_expires=", os.date("%Y-%m-%d %T %z", expires))
         if err then
-            ngx.say(err)
+            -- ngx.say would commit the response, leaving ngx.exit unable to set
+            -- a status and the caller a 200 carrying this string
+            ngx.log(ngx.ERR, "unreadable SessionNotOnOrAfter ", loggable(session_expires),
+                " in response from IdP: ", err)
             ngx.exit(500)
         end
+        ngx.log(ngx.INFO, "login callback: session_expires=",
+            os.date("!%Y-%m-%d %TZ", expires))
     end
 
+
+    -- the last gate: everything that can still refuse this login has run, so
+    -- the assertion is spent only where it actually authenticates somebody
+    local spent
+    if self.replay_dict then
+        local spent_ok, spent_or_err = spend_assertions(self.replay_dict, self.replay_dict_name,
+            opts, assertions, expected, now)
+        if not spent_ok then
+            ngx.log(ngx.ERR, "response from IdP rejected: ", loggable(spent_or_err))
+            ngx.exit(ngx.HTTP_UNAUTHORIZED)
+        end
+        spent = spent_or_err
+    end
 
     sess:set("authenticated", true)
     sess:set("name_id", name_id)
@@ -329,10 +806,20 @@ local function login_callback(self, opts)
 
     -- clear temporary authentication state no longer needed after successful login
     sess:set("saml_state", nil)
+    sess:set("saml_request_id", nil)
     sess:set("request_uri", nil)
-    sess:save()
+    local saved, save_err = sess:save()
+    if not saved then
+        if spent then
+            for _, key in ipairs(spent) do
+                self.replay_dict:delete(key)
+            end
+        end
+        ngx.log(ngx.ERR, "could not save authenticated session: ", save_err)
+        return ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
+    end
 
-    ngx.log(ngx.INFO, "login finish: name_id=", name_id)
+    ngx.log(ngx.INFO, "login finish: name_id=", loggable(name_id))
 
     return ngx.redirect(request_uri)
 end
@@ -404,20 +891,20 @@ local function logout_callback(self, opts)
 
         local saved_issuer = sess:get("issuer")
         if issuer ~= saved_issuer then
-            ngx.log(ngx.WARN, "issuer different: issuer=", issuer,
+            ngx.log(ngx.WARN, "issuer different: issuer=", loggable(issuer),
                 ", data.issuer=", saved_issuer)
         end
 
         local saved_name_id = sess:get("name_id")
         if name_id ~= saved_name_id then
-            ngx.log(ngx.WARN, "name_id different: name_id=", name_id,
+            ngx.log(ngx.WARN, "name_id different: name_id=", loggable(name_id),
                 ", data.name_id=", saved_name_id)
         end
 
         local saved_session_index = sess:get("session_index")
         if session_index ~= saved_session_index then
             ngx.log(ngx.WARN, "session_index different: session_index=",
-                session_index, ", data.session_index=", saved_session_index)
+                loggable(session_index), ", data.session_index=", saved_session_index)
         end
 
         sess:destroy()
@@ -437,7 +924,7 @@ local function logout_callback(self, opts)
     else
         local status_code = saml.doc_status_code(doc)
         if status_code ~= saml.STATUS_SUCCESS then
-            ngx.log(ngx.ERR, "IdP returned non-success status: ", status_code)
+            ngx.log(ngx.ERR, "IdP returned non-success status: ", loggable(status_code))
             ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
         end
 
@@ -494,6 +981,34 @@ function _M.new(opts)
     obj.key_mngr_from_doc = function(doc) return obj.idp_cert_manager end
     obj.idp_cert_func = function(doc) return idp_cert end
     obj.auth_protocol_binding_method = opts.auth_protocol_binding_method
+    obj.idp_issuers = issuer_set(opts.idp_issuers)
+    -- read once, and raised rather than returned so a mistyped name names
+    -- itself. A message built as an argument to assert is built on every
+    -- successful call too, and a non-string one fails on the concatenation
+    -- rather than on the option.
+    if opts.replay_dict ~= nil then
+        if type(opts.replay_dict) ~= "string" then
+            error("replay_dict must be the name of a lua_shared_dict", 2)
+        end
+        obj.replay_dict = ngx.shared[opts.replay_dict]
+        if obj.replay_dict == nil then
+            error("no lua_shared_dict named " .. opts.replay_dict, 2)
+        end
+        -- the handle carries no name accessor, so the name it was resolved
+        -- from rides beside it for the diagnostics
+        obj.replay_dict_name = opts.replay_dict
+        -- it is half the key, and tostring would turn a missing one into the
+        -- literal nil that two deployments would then share
+        if type(opts.sp_issuer) ~= "string" then
+            error("sp_issuer must be a string to track assertions", 2)
+        end
+        -- zero means never expire to lua_shared_dict, and a number arriving
+        -- from YAML or the environment as text compares against nothing
+        if opts.replay_ttl ~= nil and
+            (type(opts.replay_ttl) ~= "number" or opts.replay_ttl < 1) then
+            error("replay_ttl must be a positive number of seconds", 2)
+        end
+    end
     local cookie_secure, cookie_same_site
     if opts.auth_protocol_binding_method == "HTTP-POST" then
         cookie_secure = true

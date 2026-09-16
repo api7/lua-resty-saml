@@ -386,7 +386,7 @@ static int doc_name_id(lua_State* L) {
 
 
 /***
-Get the text of the issuer node
+Get the issuer of the assertion a Response carries, or of the message itself
 @function doc_issuer
 @tparam xmlDoc* doc
 @treturn ?string issuer
@@ -403,6 +403,35 @@ static int doc_issuer(lua_State* L) {
     lua_pushstring(L, (char*)issuer);
     xmlFree(issuer);
   }
+  return 1;
+}
+
+
+/***
+Get the issuer of every assertion whose content the document's readers consume
+@function doc_issuers
+@tparam xmlDoc* doc
+@treturn table issuers
+*/
+static int doc_issuers(lua_State* L) {
+  lua_settop(L, 1);
+  xmlDoc* doc = doc_check(L, 1);
+  lua_pop(L, 1);
+
+  xmlChar** issuers;
+  size_t issuers_len;
+  if (saml_doc_issuers(doc, &issuers, &issuers_len) < 0) {
+    lua_pushnil(L);
+    return 1;
+  }
+
+  lua_newtable(L);
+  for (size_t i = 0; i < issuers_len; i++) {
+    lua_pushinteger(L, i + 1);
+    lua_pushstring(L, issuers[i] == NULL ? "" : (char*)issuers[i]);
+    lua_settable(L, -3);
+  }
+  saml_issuers_free(issuers, issuers_len);
   return 1;
 }
 
@@ -515,6 +544,169 @@ static int doc_attrs(lua_State* L) {
     }
   }
   saml_attrs_free(attrs, attrs_len);
+  return 1;
+}
+
+
+/***
+Get the InResponseTo attribute of the root message
+@function doc_in_response_to
+@tparam xmlDoc* doc
+@treturn ?string in_response_to
+@treturn ?string error
+*/
+static int doc_in_response_to(lua_State* L) {
+  lua_settop(L, 1);
+  xmlDoc* doc = doc_check(L, 1);
+  lua_pop(L, 1);
+
+  xmlChar* in_response_to;
+  if (saml_doc_in_response_to(doc, &in_response_to) < 0) {
+    lua_pushnil(L);
+    lua_pushstring(L, "could not read InResponseTo");
+    return 2;
+  }
+
+  if (in_response_to == NULL) {
+    lua_pushnil(L);
+  } else {
+    lua_pushstring(L, (char*)in_response_to);
+    xmlFree(in_response_to);
+  }
+  lua_pushnil(L);
+  return 2;
+}
+
+
+/***
+Get the Destination attribute of the root message
+@function doc_destination
+@tparam xmlDoc* doc
+@treturn ?string destination
+@treturn ?string error
+*/
+static int doc_destination(lua_State* L) {
+  lua_settop(L, 1);
+  xmlDoc* doc = doc_check(L, 1);
+  lua_pop(L, 1);
+
+  // nil for an absent Destination and nil for one that could not be read would
+  // be the same answer to the caller, and it skips the check on the first
+  xmlChar* destination;
+  if (saml_doc_destination(doc, &destination) < 0) {
+    lua_pushnil(L);
+    lua_pushstring(L, "could not read Destination");
+    return 2;
+  }
+
+  if (destination == NULL) {
+    lua_pushnil(L);
+  } else {
+    lua_pushstring(L, (char*)destination);
+    xmlFree(destination);
+  }
+  lua_pushnil(L);
+  return 2;
+}
+
+
+// An absent attribute is left absent rather than pushed as an empty string, so
+// that the caller can tell "the IdP said nothing" from "the IdP said nothing
+// useful".
+static void set_str_field(lua_State* L, const char* name, const xmlChar* value) {
+  if (value == NULL) {
+    return;
+  }
+  lua_pushstring(L, name);
+  lua_pushstring(L, (const char*)value);
+  lua_settable(L, -3);
+}
+
+
+static void set_bool_field(lua_State* L, const char* name, int value) {
+  lua_pushstring(L, name);
+  lua_pushboolean(L, value);
+  lua_settable(L, -3);
+}
+
+
+static void push_audience_restrictions(lua_State* L, saml_assertion_t* a) {
+  lua_pushstring(L, "audience_restrictions");
+  lua_newtable(L);
+  for (size_t i = 0; i < a->audience_restrictions_len; i++) {
+    saml_audience_restriction_t* restriction = a->audience_restrictions + i;
+    lua_pushinteger(L, i + 1);
+    lua_newtable(L);
+    // a dense index, so an audience with no text leaves no hole for ipairs to
+    // stop at and shorten the list the assertion declared
+    int n = 0;
+    for (size_t j = 0; j < restriction->audiences_len; j++) {
+      if (restriction->audiences[j] == NULL) {
+        continue;
+      }
+      lua_pushinteger(L, ++n);
+      lua_pushstring(L, (char*)restriction->audiences[j]);
+      lua_settable(L, -3);
+    }
+    lua_settable(L, -3);
+  }
+  lua_settable(L, -3);
+}
+
+
+static void push_subject_confirmations(lua_State* L, saml_assertion_t* a) {
+  lua_pushstring(L, "subject_confirmations");
+  lua_newtable(L);
+  for (size_t i = 0; i < a->confirmations_len; i++) {
+    saml_subject_confirmation_t* confirmation = a->confirmations + i;
+    lua_pushinteger(L, i + 1);
+    lua_newtable(L);
+    set_str_field(L, "method", confirmation->method);
+    set_str_field(L, "recipient", confirmation->recipient);
+    set_str_field(L, "not_before", confirmation->not_before);
+    set_str_field(L, "not_on_or_after", confirmation->not_on_or_after);
+    set_str_field(L, "in_response_to", confirmation->in_response_to);
+    lua_settable(L, -3);
+  }
+  lua_settable(L, -3);
+}
+
+
+/***
+Get the constraints each top-level assertion of the document attaches to itself
+@function doc_assertions
+@tparam xmlDoc* doc
+@treturn table assertions
+*/
+static int doc_assertions(lua_State* L) {
+  lua_settop(L, 1);
+  xmlDoc* doc = doc_check(L, 1);
+  lua_pop(L, 1);
+
+  saml_assertion_t* assertions;
+  size_t assertions_len;
+  if (saml_doc_assertions(doc, &assertions, &assertions_len) < 0) {
+    lua_pushnil(L);
+    return 1;
+  }
+
+  lua_newtable(L);
+  for (size_t i = 0; i < assertions_len; i++) {
+    saml_assertion_t* a = assertions + i;
+    lua_pushinteger(L, i + 1);
+    lua_newtable(L);
+    set_str_field(L, "id", a->id);
+    set_str_field(L, "issuer", a->issuer);
+    set_bool_field(L, "has_conditions", a->has_conditions);
+    set_bool_field(L, "one_time_use", a->one_time_use);
+    set_str_field(L, "not_before", a->not_before);
+    set_str_field(L, "not_on_or_after", a->not_on_or_after);
+    set_str_field(L, "unknown_condition", a->unknown_condition);
+    push_audience_restrictions(L, a);
+    push_subject_confirmations(L, a);
+    lua_settable(L, -3);
+  }
+  saml_assertions_free(assertions, assertions_len);
   return 1;
 }
 
@@ -1160,11 +1352,15 @@ static const struct luaL_Reg saml_funcs[] = {
   {"doc_root_name", doc_root_name},
   {"doc_id", doc_id},
   {"doc_issuer", doc_issuer},
+  {"doc_issuers", doc_issuers},
   {"doc_name_id", doc_name_id},
   {"doc_status_code", doc_status_code},
   {"doc_session_index", doc_session_index},
   {"doc_session_expires", doc_session_expires},
   {"doc_attrs", doc_attrs},
+  {"doc_assertions", doc_assertions},
+  {"doc_destination", doc_destination},
+  {"doc_in_response_to", doc_in_response_to},
 
   {"key_read_memory", key_read_memory},
   {"key_read_file", key_read_file},

@@ -41,7 +41,12 @@ const char* SAML_STATUS_VERSION_MISMATCH = "urn:oasis:names:tc:SAML:2.0:status:V
 
 static int DEBUG_ENABLED = 1;
 static void ingoreGenericError(void* ctx, const char* msg, ...) {};
+/* libxml2 2.12 made the error passed to xmlStructuredErrorFunc const */
+#if LIBXML_VERSION >= 21200
+static void ingoreStructuredError(void* userData, const xmlError* error) {};
+#else
 static void ingoreStructuredError(void* userData, xmlError* error) {};
+#endif
 
 
 static void saml_log(char* msg) {
